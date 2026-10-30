@@ -32,7 +32,8 @@ scenario, or `make serve SCENARIO=` to start idle.
 2. **Perception.** A classical fluorescence tracker runs at 5–10 Hz. SAM 3.1 is
    an asynchronous refinement at ≤2 Hz, never in the decision path; a slow or
    dead API costs mask detail, not ticks. The cache is keyed by
-   `sha256(image_bytes + prompt + model)`.
+   `sha256(pixel bytes + prompt + model)` — the raw crop, not an encoded PNG,
+   because the same pixels compress to different bytes on different CPUs.
 3. **Fusion.** `P = σ(1.85·φv + 2.10·φh + 1.25·min(φt,0) + 2.50·W − 2.80)`.
    The weights are hand-set priors, not calibrated coefficients.
 4. **Decision.** A stateless rule table plus separate escalation and
