@@ -149,9 +149,18 @@ plc:
   port: 5020                  # 502 requires root; documented in README
   unit_id: 1
   valve_travel_ms: 950
+  valve_slow_ms: 1200         # <= slow: VERIFIED; <= fault: VERIFIED_SLOW; above: FAULT
+  valve_fault_ms: 1500
+  depressurize_ms: 500
+  open_pressure_psi: 34.0
+  nominal_flow_lpm: 9.0
+  tick_ms: 20
 
 bmc:
   base_url: "http://127.0.0.1:8443"   # mock only, no TLS, no auth, host-local
+  host: "127.0.0.1"
+  port: 8443
+  node_id: "gpu-node-08b"
 
 thermal_model:
   c_th_j_per_k: 350.0      # assumption, not a measurement (PRD D-07)
@@ -162,8 +171,12 @@ thermal_model:
 
 scheduler:
   kind: "slurm-mock"
-  standby_node: "gpu-node-09a"
   job_id: "train-llm-0427"
+  node: "gpu-node-08b"
+  standby_node: "gpu-node-09a"
+  gpus: 4
+  train_interval_s: 1.0
+  checkpoint_every_s: 10.0
 
 report:
   provider: "baseten"

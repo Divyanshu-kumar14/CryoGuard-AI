@@ -55,3 +55,43 @@ def test_dry_scenario_has_positive_margin_but_adds_no_leak_evidence(cfg, scenari
     margin = dew_margin_c(surface_c, air_c, rh)
     assert margin > 0.0
     assert thermal_phi(margin, cfg["fusion"]["thermal"]) > 0.0
+
+
+def test_absolute_humidity_matches_the_published_values() -> None:
+    from cryoguard.telemetry.psychrometrics import absolute_humidity_g_m3
+
+    assert absolute_humidity_g_m3(25.0, 50.0) == pytest.approx(11.5, abs=0.1)
+    assert absolute_humidity_g_m3(30.0, 60.0) == pytest.approx(18.2, abs=0.1)
+    assert absolute_humidity_g_m3(20.0, 50.0) == pytest.approx(8.6, abs=0.1)
+
+
+def test_absolute_humidity_rises_with_humidity_at_fixed_temperature() -> None:
+    from cryoguard.telemetry.psychrometrics import absolute_humidity_g_m3
+
+    values = [absolute_humidity_g_m3(25.0, rh) for rh in (20.0, 40.0, 60.0, 80.0)]
+    assert values == sorted(values)
+
+
+def test_wet_bulb_matches_the_stull_reference_values() -> None:
+    from cryoguard.telemetry.psychrometrics import wet_bulb_c
+
+    assert wet_bulb_c(25.0, 50.0) == pytest.approx(17.7, abs=0.5)
+    assert wet_bulb_c(30.0, 60.0) == pytest.approx(23.9, abs=0.5)
+    assert wet_bulb_c(20.0, 50.0) == pytest.approx(13.7, abs=0.5)
+
+
+def test_psychrometric_ordering_holds_for_unsaturated_air() -> None:
+    from cryoguard.telemetry.psychrometrics import wet_bulb_c
+
+    for temp_c, rh in ((20.0, 50.0), (30.0, 60.0), (35.0, 40.0)):
+        dew = dew_point_c(temp_c, rh)
+        wet = wet_bulb_c(temp_c, rh)
+        assert dew <= wet <= temp_c
+
+
+@pytest.mark.parametrize("rh", [4.9, 100.0])
+def test_wet_bulb_outside_the_stull_correlation_fails_loudly(rh: float) -> None:
+    from cryoguard.telemetry.psychrometrics import wet_bulb_c
+
+    with pytest.raises(ValueError, match="wet-bulb correlation"):
+        wet_bulb_c(25.0, rh)

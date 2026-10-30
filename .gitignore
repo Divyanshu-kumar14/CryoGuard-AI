@@ -19,6 +19,7 @@ htmlcov/
 
 # Generated at runtime; incidents are re-creatable, benchmark reports are not (keep reports/)
 artifacts/incidents/*.json
+artifacts/checkpoints/*
 
 # OS / editor
 .DS_Store

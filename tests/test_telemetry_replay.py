@@ -68,3 +68,29 @@ def test_non_monotonic_time_fails_loudly() -> None:
     }
     with pytest.raises(TelemetryError, match="strictly increasing"):
         TelemetryReplay(bad)
+
+
+def test_series_is_time_aligned_to_the_video_clock() -> None:
+    telemetry = TelemetryReplay(load("slow_leak_qd4"))
+    series = telemetry.iter_series(duration_s=2.0, dt_s=0.2)
+
+    assert len(series) == 11
+    assert [sample.t_s for sample in series] == pytest.approx([index * 0.2 for index in range(11)])
+    assert series[5].pressure_psi == pytest.approx(telemetry.pressure_at(1.0))
+
+
+def test_series_hash_is_identical_across_replays() -> None:
+    first = TelemetryReplay(load("slow_leak_qd4"))
+    second = TelemetryReplay(load("slow_leak_qd4"))
+    assert first.series_hash(20.0, 0.2) == second.series_hash(20.0, 0.2)
+
+
+def test_a_different_grid_changes_the_hash() -> None:
+    telemetry = TelemetryReplay(load("slow_leak_qd4"))
+    assert telemetry.series_hash(20.0, 0.2) != telemetry.series_hash(20.0, 0.1)
+
+
+@pytest.mark.parametrize("duration, dt", [(-1.0, 0.2), (1.0, 0.0)])
+def test_an_invalid_series_grid_fails_loudly(duration: float, dt: float) -> None:
+    with pytest.raises(TelemetryError):
+        TelemetryReplay(load("slow_leak_qd4")).iter_series(duration, dt)

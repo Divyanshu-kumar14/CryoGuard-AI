@@ -7,7 +7,9 @@ bit-identical values.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import hashlib
+import json
+from dataclasses import asdict, dataclass
 from typing import Any
 
 import numpy as np
@@ -92,6 +94,30 @@ class TelemetryReplay:
             dew_point_c=dew,
             dew_margin_c=surface - dew,
         )
+
+    def iter_series(self, duration_s: float, dt_s: float) -> list[TelemetrySample]:
+        """Fixed-grid samples on the video clock, never the wall clock (P4-T02)."""
+
+        if duration_s < 0:
+            raise TelemetryError(f"duration must be non-negative: {duration_s}")
+        if dt_s <= 0:
+            raise TelemetryError(f"dt must be positive: {dt_s}")
+
+        count = int(round(duration_s / dt_s))
+        return [self.sample(index * dt_s) for index in range(count + 1)]
+
+    def series_hash(self, duration_s: float, dt_s: float) -> str:
+        """Stable hash of a replay series; two runs must match exactly."""
+
+        payload = []
+        for sample in self.iter_series(duration_s, dt_s):
+            record = {
+                key: (round(value, 9) if isinstance(value, float) else value)
+                for key, value in asdict(sample).items()
+            }
+            payload.append(record)
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 # Re-exported so callers do not need both modules for the common case.

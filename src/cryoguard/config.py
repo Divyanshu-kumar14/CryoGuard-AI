@@ -21,6 +21,7 @@ REQUIRED_SECTIONS = (
     "thermal_model",
     "nvml",
     "plc",
+    "bmc",
     "scheduler",
     "report",
     "demo",

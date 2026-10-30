@@ -42,3 +42,11 @@ probe:
 ## End-to-end vertical slice: clip -> incident JSON.
 demo:
 	PYTHONPATH=src $(PY) -m cryoguard.app --scenario $(SCENARIO) --headless
+
+## Start the SIMULATED PLC (Modbus-TCP 5020) and BMC (Redfish 8443).
+sims:
+	PYTHONPATH=src $(PY) -m cryoguard.sims.run
+
+## Emit deterministic training checkpoints for the checkpoint gate.
+checkpoints:
+	PYTHONPATH=src $(PY) -m cryoguard.sims.train_job --duration 30
