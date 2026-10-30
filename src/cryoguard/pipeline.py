@@ -21,6 +21,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import cv2
+import numpy as np
 import yaml
 
 from cryoguard.adapters.loopback import SimEndpoints, loopback_simulators
@@ -31,9 +33,11 @@ from cryoguard.adapters.scheduler import CheckpointAdapter, SchedulerAdapter
 from cryoguard.capture.rectify import estimate
 from cryoguard.capture.source import VideoSource
 from cryoguard.config import config_hash, get
+from cryoguard.events import EventBus
 from cryoguard.fusion.features import hydraulic_phi, thermal_phi, visual_phi
 from cryoguard.fusion.hysteresis import HysteresisDecision
 from cryoguard.models import Decision, Evidence, IncidentState, SystemLabel
+from cryoguard.orchestrator.actions import StepCallback
 from cryoguard.orchestrator.adapters import (
     ScenarioClock,
     SimulatedBmc,
@@ -189,8 +193,77 @@ def _steps_to_actions(steps: Sequence[SequenceStep]) -> list[ActionModel]:
     ]
 
 
+def _candidate_contours(
+    candidate: Candidate | None, *, max_polygons: int = 4, max_points: int = 64
+) -> list[list[list[int]]]:
+    """Full-canvas polygons for the dashboard, decimated for a 10 Hz stream.
+
+    The mask is cropped, so every point is shifted by ``offset_px``. Polygons
+    under four pixels are dropped: they are tracking noise, not a contour a
+    human should see, and they would bloat every frame event.
+    """
+
+    if candidate is None or candidate.mask.size == 0:
+        return []
+    mask = np.ascontiguousarray(candidate.mask, dtype=np.uint8) * 255
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours = sorted(contours, key=cv2.contourArea, reverse=True)[:max_polygons]
+    ox, oy = candidate.offset_px
+    polygons: list[list[list[int]]] = []
+    for contour in contours:
+        if cv2.contourArea(contour) < 4:
+            continue
+        perimeter = cv2.arcLength(contour, True)
+        approx = cv2.approxPolyDP(contour, max(0.75, perimeter * 0.01), True).reshape(-1, 2)
+        if len(approx) < 3:
+            continue
+        stride = max(1, len(approx) // max_points) if len(approx) > max_points else 1
+        points = approx[::stride]
+        polygons.append([[int(x) + int(ox), int(y) + int(oy)] for x, y in points])
+    return polygons
+
+
+def _candidate_event(candidate: Candidate | None) -> dict[str, Any] | None:
+    if candidate is None:
+        return None
+    return {
+        "trackId": int(candidate.track_id),
+        "zone": candidate.zone,
+        "areaMm2": round(float(candidate.area_mm2), 2),
+        "growthMm2PerS": round(float(candidate.growth_mm2_per_s), 3),
+        "centroidMm": [
+            round(float(candidate.centroid_mm[0]), 1),
+            round(float(candidate.centroid_mm[1]), 1),
+        ],
+        "quality": round(float(candidate.quality), 3),
+        "wetness": round(float(candidate.wetness), 3),
+        "samVerified": bool(candidate.sam_verified),
+        "stale": bool(candidate.stale),
+    }
+
+
+def _step_emitter(bus: EventBus, protocol: str) -> StepCallback:
+    """Emit each orchestrator step as it is appended, even from a worker thread."""
+
+    simulated = protocol != "external"
+
+    def emit(step: SequenceStep, seq: int) -> None:
+        bus.publish(
+            "ACTION_EXECUTED",
+            step.ts,
+            seq=seq,
+            actor=step.actor,
+            command=step.command,
+            status=step.status,
+            detail=step.detail,
+            simulated=simulated,
+        )
+
+    return emit
+
+
 def _run_memory_sequence(
-    decision_t: float, cfg: dict[str, Any]
+    decision_t: float, cfg: dict[str, Any], on_step: StepCallback | None = None
 ) -> tuple[list[ActionModel], IncidentState]:
     """No sockets: the same FSM with in-memory ports (unit tests, offline CI)."""
 
@@ -208,6 +281,7 @@ def _run_memory_sequence(
         bmc=SimulatedBmc(),
         scheduler=SimulatedScheduler(cfg["scheduler"]),
         clamp_latency_ms=get(cfg, "orchestrator.clamp_latency_ms"),
+        on_step=on_step,
     )
     fsm = orchestrator.run()
     return _steps_to_actions(orchestrator.steps), fsm.state
@@ -218,6 +292,7 @@ def _run_live_sequence(
     cfg: dict[str, Any],
     endpoints: SimEndpoints,
     checkpoint_dir: str | Path | None,
+    on_step: StepCallback | None = None,
 ) -> tuple[list[ActionModel], IncidentState]:
     """Real Modbus-TCP and Redfish clients; the blocking run happens in a thread."""
 
@@ -240,6 +315,7 @@ def _run_live_sequence(
         bmc=RedfishClient(cfg["bmc"], base_url=endpoints.bmc_url),
         scheduler=SchedulerAdapter(cfg["scheduler"]),
         clamp_latency_ms=float(get(cfg, "orchestrator.clamp_latency_ms")),
+        on_step=on_step,
     )
     fsm = orchestrator.run()
     return _steps_to_actions(orchestrator.steps), fsm.state
@@ -250,15 +326,16 @@ async def _confirmed_leak_actions(
     cfg: dict[str, Any],
     checkpoint_dir: str | Path | None,
     mode: str,
+    on_step: StepCallback | None = None,
 ) -> tuple[list[ActionModel], IncidentState]:
     if mode == "memory":
-        return _run_memory_sequence(decision_t, cfg)
+        return _run_memory_sequence(decision_t, cfg, on_step)
     if mode == "loopback":
         # The PLC ticker and the BMC server live on this event loop. The blocking
         # clients must run in a worker thread or the simulation would deadlock.
         async with loopback_simulators(cfg) as endpoints:
             return await asyncio.to_thread(
-                _run_live_sequence, decision_t, cfg, endpoints, checkpoint_dir
+                _run_live_sequence, decision_t, cfg, endpoints, checkpoint_dir, on_step
             )
     if mode == "external":
         return await asyncio.to_thread(
@@ -267,6 +344,7 @@ async def _confirmed_leak_actions(
             cfg,
             SimEndpoints.from_config(cfg),
             checkpoint_dir,
+            on_step,
         )
     raise PipelineError(
         f"unknown orchestrator.protocol_mode {mode!r} (expected memory, loopback, or external)"
@@ -274,31 +352,41 @@ async def _confirmed_leak_actions(
 
 
 async def _emergency_actions(
-    t_s: float, cfg: dict[str, Any], reason: str, mode: str
+    t_s: float,
+    cfg: dict[str, Any],
+    reason: str,
+    mode: str,
+    on_step: StepCallback | None = None,
 ) -> tuple[list[ActionModel], IncidentState]:
     """R1: valve, cordon, power cut - the same transports as every other path."""
 
     mode = mode.lower()
     if mode == "memory":
-        return await asyncio.to_thread(_run_emergency_memory, t_s, cfg, reason)
+        return await asyncio.to_thread(_run_emergency_memory, t_s, cfg, reason, on_step)
     if mode == "loopback":
         async with loopback_simulators(cfg) as endpoints:
-            return await asyncio.to_thread(_run_emergency_live, t_s, cfg, endpoints, reason)
+            return await asyncio.to_thread(
+                _run_emergency_live, t_s, cfg, endpoints, reason, on_step
+            )
     if mode == "external":
         return await asyncio.to_thread(
-            _run_emergency_live, t_s, cfg, SimEndpoints.from_config(cfg), reason
+            _run_emergency_live, t_s, cfg, SimEndpoints.from_config(cfg), reason, on_step
         )
     raise PipelineError(f"unknown orchestrator.protocol_mode {mode!r}")
 
 
 def _run_emergency_memory(
-    t_s: float, cfg: dict[str, Any], reason: str
+    t_s: float,
+    cfg: dict[str, Any],
+    reason: str,
+    on_step: StepCallback | None = None,
 ) -> tuple[list[ActionModel], IncidentState]:
     result = EmergencySequence(
         ScenarioClock(t_s),
         SimulatedPlc(get(cfg, "plc.valve_travel_ms")),
         SimulatedBmc(),
         SimulatedScheduler(cfg["scheduler"]),
+        on_step=on_step,
     ).run(reason)
     return _steps_to_actions(result.steps), result.state
 
@@ -308,12 +396,14 @@ def _run_emergency_live(
     cfg: dict[str, Any],
     endpoints: SimEndpoints,
     reason: str,
+    on_step: StepCallback | None = None,
 ) -> tuple[list[ActionModel], IncidentState]:
     result = EmergencySequence(
         ScenarioClock(t_s),
         PlcClient(cfg["plc"], host=endpoints.plc_host, port=endpoints.plc_port),
         RedfishClient(cfg["bmc"], base_url=endpoints.bmc_url),
         SchedulerAdapter(cfg["scheduler"]),
+        on_step=on_step,
     ).run(reason)
     return _steps_to_actions(result.steps), result.state
 
@@ -324,23 +414,36 @@ async def _actions_for(
     cfg: dict[str, Any],
     checkpoint_dir: str | Path | None,
     protocol: str,
+    on_step: StepCallback | None = None,
 ) -> tuple[list[ActionModel], IncidentState | None]:
     if decision.label is SystemLabel.CONFIRMED_LEAK:
-        return await _confirmed_leak_actions(t_s, cfg, checkpoint_dir, protocol)
+        return await _confirmed_leak_actions(t_s, cfg, checkpoint_dir, protocol, on_step)
 
     if decision.label is SystemLabel.EMERGENCY_TRIP:
         # R1: no checkpoint wait and no requeue. The hardware condition is the trigger.
-        return await _emergency_actions(t_s, cfg, f"{decision.rule_id}: emergency trip", protocol)
+        return await _emergency_actions(
+            t_s, cfg, f"{decision.rule_id}: emergency trip", protocol, on_step
+        )
 
     if decision.label is SystemLabel.HIDDEN_HYDRAULIC_EVENT:
         drained = SimulatedScheduler(cfg["scheduler"]).drain()
-        return (
-            [
-                _action(1, t_s, "CONSOLE", "ALERT", "RAISED", "no visual evidence"),
-                _action(2, t_s, "SLURM", "SCHEDULER_DRAIN", drained, "soft cordon; no valve"),
-            ],
-            None,
-        )
+        actions = [
+            _action(1, t_s, "CONSOLE", "ALERT", "RAISED", "no visual evidence"),
+            _action(2, t_s, "SLURM", "SCHEDULER_DRAIN", drained, "soft cordon; no valve"),
+        ]
+        if on_step is not None:
+            for index, action in enumerate(actions, 1):
+                on_step(
+                    SequenceStep(
+                        ts=action.t_s,
+                        actor=action.actor,
+                        command=action.command,
+                        status=action.status,
+                        detail=action.detail,
+                    ),
+                    index,
+                )
+        return actions, None
 
     return [], None
 
@@ -386,6 +489,7 @@ async def run_scenario(
     protocol_mode: str | None = None,
     checkpoint_dir: str | Path | None = None,
     allow_llm: bool = True,
+    bus: EventBus | None = None,
 ) -> RunResult:
     scenario = load_scenario(name)
     clip = ROOT / scenario["clip"]
@@ -400,6 +504,9 @@ async def run_scenario(
 
     mode = str(sam_mode or cfg["sam"].get("mode", "off"))
     protocol = str(protocol_mode or cfg["orchestrator"]["protocol_mode"]).lower()
+    fixture_source = str(scenario.get("provenance", "synthetic"))
+    if fixture_source not in ("synthetic", "capture"):
+        raise PipelineError(f"scenario provenance must be synthetic or capture: {fixture_source}")
     sampler = CandidateManager(
         cfg["perception"],
         topology,
@@ -410,6 +517,27 @@ async def run_scenario(
     telemetry = TelemetryReplay(scenario)
     engine = HysteresisDecision(cfg)
     policy = SamplingPolicy(cfg["perception"])
+    emit_step: StepCallback | None = _step_emitter(bus, protocol) if bus is not None else None
+    if bus is not None:
+        bus.bind(asyncio.get_running_loop())
+        bus.publish(
+            "RUN_STARTED",
+            0.0,
+            scenario=resolve_scenario(name),
+            scenarioKey=name,
+            clip=str(scenario["clip"]),
+            provenance=fixture_source,
+            simulated=fixture_source == "synthetic",
+            configHash=config_hash(cfg),
+            samMode=mode,
+            protocolMode=protocol,
+            tickRateHz=policy.hz,
+            canvas={"widthPx": canvas[0], "heightPx": canvas[1], "pxPerMm": px_per_mm},
+            chassis={
+                "widthMm": float(topology["chassis"]["width_mm"]),
+                "heightMm": float(topology["chassis"]["height_mm"]),
+            },
+        )
     worker: SamWorker | None = None
     last_decision: Decision | None = None
     last_frame = 0
@@ -446,7 +574,7 @@ async def run_scenario(
             emergency_reason = reason.value
             started = time.perf_counter()
             emergency_actions, emergency_state = await _emergency_actions(
-                last_t_s, cfg, detail, protocol
+                last_t_s, cfg, detail, protocol, emit_step
             )
             emergency_ms = (time.perf_counter() - started) * 1000.0
 
@@ -490,6 +618,21 @@ async def run_scenario(
                 perception_ms.append((time.perf_counter() - tick_started) * 1000.0)
                 chosen = CandidateManager.select(candidates)
                 sample = telemetry.sample(frame.t_s)
+                if bus is not None:
+                    bus.publish(
+                        "FRAME_TICK",
+                        frame.t_s,
+                        frame=frame.index,
+                        contours=_candidate_contours(chosen),
+                        candidate=_candidate_event(chosen),
+                        camera={
+                            "ok": health.ok,
+                            "reasons": list(health.reasons),
+                            "brightness": round(float(health.brightness), 1),
+                            "focus": round(float(health.focus), 1),
+                            "saturation": round(float(health.saturation), 4),
+                        },
+                    )
 
                 if chosen is None:
                     phi_v = 0.0
@@ -537,9 +680,53 @@ async def run_scenario(
                     hydraulic_low_ms=hydraulic_low_ms,
                     maintenance=bool(get(cfg, "system.maintenance_mode")),
                 )
+                if bus is not None:
+                    bus.publish(
+                        "EVIDENCE_UPDATE",
+                        frame.t_s,
+                        phiV=round(float(phi_v), 4),
+                        phiH=round(float(phi_h), 4),
+                        phiT=round(float(phi_t), 4),
+                        W=round(float(wet), 3),
+                        areaMm2=round(float(chosen.area_mm2), 2) if chosen is not None else 0.0,
+                        growthMm2PerS=round(float(growth), 3),
+                        quality=round(float(quality), 3),
+                        zone=zone,
+                        hydraulicLowMs=int(hydraulic_low_ms),
+                        pressurePsi=round(float(sample.pressure_psi), 2),
+                        pressureRatePsiPerS=round(float(sample.pressure_rate_psi_per_s), 3),
+                        flowImbalanceLpm=round(float(sample.flow_imbalance_lpm), 3),
+                        surfaceC=round(float(sample.surface_c), 2),
+                        airC=round(float(sample.air_c), 2),
+                        rhPct=round(float(sample.rh_pct), 1),
+                        dewPointC=round(float(sample.dew_point_c), 2),
+                        dewMarginC=round(float(sample.dew_margin_c), 2),
+                        cameraHealthy=bool(health.ok),
+                    )
+                previous_decision = last_decision
                 fusion_started = time.perf_counter()
                 decision = engine.update(evidence, frame.t_s)
                 fusion_ms.append((time.perf_counter() - fusion_started) * 1000.0)
+                if bus is not None:
+                    changed = (
+                        previous_decision is None
+                        or previous_decision.label is not decision.label
+                        or previous_decision.rule_id != decision.rule_id
+                    )
+                    bus.publish(
+                        "DECISION_CHANGE",
+                        frame.t_s,
+                        ruleId=decision.rule_id,
+                        label=decision.label.value,
+                        p=round(float(decision.p), 4),
+                        changed=changed,
+                        previousLabel=(
+                            previous_decision.label.value if previous_decision is not None else None
+                        ),
+                        streak=int(engine.streak),
+                        dropStreak=int(engine.drop_streak),
+                        actuates=bool(decision.actuates),
+                    )
                 last_decision = decision
                 last_t_s = frame.t_s
                 last_evidence = evidence
@@ -580,12 +767,13 @@ async def run_scenario(
                         tick_rate_hz=policy.hz,
                         rate_changes=policy.changes,
                         protocol_mode=protocol,
+                        bus=bus,
                     )
 
                 if decision.label in INCIDENT_LABELS:
                     sequence_started = time.perf_counter()
                     actions, sequence_state = await _actions_for(
-                        decision, frame.t_s, cfg, checkpoint_dir, protocol
+                        decision, frame.t_s, cfg, checkpoint_dir, protocol, emit_step
                     )
                     sequence_ms = (time.perf_counter() - sequence_started) * 1000.0
                     return await _finish(
@@ -612,6 +800,7 @@ async def run_scenario(
                         tick_rate_hz=policy.hz,
                         rate_changes=policy.changes,
                         protocol_mode=protocol,
+                        bus=bus,
                     )
         finally:
             watchdog_stop.set()
@@ -657,6 +846,19 @@ async def run_scenario(
             tick_rate_hz=policy.hz,
             rate_changes=policy.changes,
             protocol_mode=protocol,
+            bus=bus,
+        )
+
+    if bus is not None:
+        bus.publish(
+            "RUN_FINISHED",
+            last_t_s,
+            outcome="no_incident",
+            ticks=ticks,
+            frames=last_frame + 1,
+            durationS=round(float(last_t_s), 3),
+            incidentId=None,
+            sequenceState=None,
         )
 
     return RunResult(
@@ -751,6 +953,7 @@ async def _finish(
     tick_rate_hz: float,
     rate_changes: int,
     protocol_mode: str,
+    bus: EventBus | None = None,
 ) -> RunResult:
     fixture_source = scenario.get("provenance", "synthetic")
     if fixture_source not in ("synthetic", "capture"):
@@ -803,6 +1006,28 @@ async def _finish(
 
     directory = Path(out_dir) if out_dir is not None else ROOT / str(get(cfg, "demo.out_dir"))
     path = write_incident(report, directory)
+    if bus is not None:
+        bus.publish(
+            "INCIDENT_CLOSED",
+            sample.t_s,
+            incidentId=report.incident_id,
+            path=str(path),
+            reportSource=report.report_source,
+            sequenceState=sequence_state.value if sequence_state is not None else None,
+            tripReason=trip_reason,
+            report=report.model_dump(by_alias=True, mode="json"),
+            simulated=fixture_source == "synthetic",
+        )
+        bus.publish(
+            "RUN_FINISHED",
+            sample.t_s,
+            outcome="incident",
+            ticks=ticks,
+            frames=frames,
+            durationS=round(float(sample.t_s), 3),
+            incidentId=report.incident_id,
+            sequenceState=sequence_state.value if sequence_state is not None else None,
+        )
     return RunResult(
         scenario=resolve_scenario(name),
         decision=decision,

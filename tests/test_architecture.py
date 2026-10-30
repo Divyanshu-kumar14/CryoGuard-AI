@@ -83,3 +83,19 @@ def test_the_composition_root_is_allowed_to_write_reports() -> None:
 
     modules = imported_modules(SRC / "pipeline.py")
     assert any(module.startswith("cryoguard.report") for module in modules)
+
+
+def test_the_event_bus_is_transport_only() -> None:
+    """The bus is shared vocabulary, not a place for pipeline or report imports."""
+
+    modules = imported_modules(SRC / "events.py")
+    assert not any(module.startswith("cryoguard") for module in modules), modules
+
+
+def test_the_dashboard_reaches_hardware_only_through_the_composition_root() -> None:
+    """A dashboard must not import a PLC, BMC, or FSM client directly."""
+
+    modules = imported_modules(SRC / "server.py")
+    assert not any(module.startswith("cryoguard.adapters") for module in modules), modules
+    assert not any(module.startswith("cryoguard.orchestrator") for module in modules), modules
+    assert "cryoguard.pipeline" in modules

@@ -1,0 +1,22 @@
+# Dashboard runtime settings (P9-T02).
+#
+# Deliberately separate from configs/default.yaml. The safety config is hashed
+# into every incident and frozen for the benchmark; changing a port must not
+# invalidate the fusion freeze or make old incidents unreadable. Nothing here
+# can change a decision.
+
+server:
+  host: "127.0.0.1"            # loopback only: /api/run is unauthenticated
+  port: 8080
+  ui_dir: "ui"
+  out_dir: "artifacts/incidents/dashboard"
+  max_history: 4096            # events kept for /api/state and late WS replay
+  event_queue: 1024            # per-subscriber buffer; a full queue drops oldest
+  heartbeat_s: 20              # keep an idle WebSocket alive through proxies
+  incident_dir: "artifacts/incidents"   # archived incidents, read-only
+
+run:
+  default_scenario: "leak"     # leak | condensation | glint | hidden
+  sam_mode: "cache"            # off | cache | live; cache is offline by design
+  protocol_mode: "loopback"    # memory | loopback | external
+  allow_llm: true              # falls back deterministically without MUSE_API_KEY

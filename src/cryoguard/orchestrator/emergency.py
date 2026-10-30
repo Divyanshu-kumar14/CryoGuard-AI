@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from cryoguard.models import IncidentState, ValveStatus
-from cryoguard.orchestrator.actions import ActionLog, Clock, SequenceStep
+from cryoguard.orchestrator.actions import ActionLog, Clock, SequenceStep, StepCallback
 from cryoguard.orchestrator.incident_fsm import BmcPort, PlcPort, PowerResult, SchedulerPort
 
 
@@ -32,12 +32,14 @@ class EmergencySequence:
         plc: PlcPort,
         bmc: BmcPort,
         scheduler: SchedulerPort,
+        on_step: StepCallback | None = None,
     ) -> None:
         self.clock = clock
         self.plc = plc
         self.bmc = bmc
         self.scheduler = scheduler
-        self.log = ActionLog(clock)
+        self.on_step = on_step
+        self.log = ActionLog(clock, on_step)
 
     def _record(self, actor: str, command: str, status: str, detail: str = "") -> SequenceStep:
         return self.log.append(actor, command, status, detail)
@@ -60,7 +62,7 @@ class EmergencySequence:
         self._record("SLURM", "SCHEDULER_DRAIN", "DRAINED", f"State={state} (mock)")
 
     def run(self, reason: str) -> EmergencyResult:
-        self.log = ActionLog(self.clock)
+        self.log = ActionLog(self.clock, self.on_step)
         try:
             valve = self.plc.close_valve()
             if valve.status is ValveStatus.VERIFIED_SLOW:

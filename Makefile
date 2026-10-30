@@ -5,7 +5,7 @@ MYPY := .venv/bin/mypy
 SCENARIO ?= leak
 SPLIT ?= all
 
-.PHONY: setup lint format typecheck test check export fixtures probe
+.PHONY: setup lint format typecheck test check export fixtures probe serve demo sims bench bench-check seed-sam checkpoints
 
 ## Create the pinned environment from uv.lock. uv owns the venv; .python-version pins 3.11.
 setup:
@@ -43,6 +43,10 @@ probe:
 ## End-to-end vertical slice: clip -> incident JSON.
 demo:
 	PYTHONPATH=src $(PY) -m cryoguard.app --scenario $(SCENARIO) --headless
+
+## Interactive dashboard on http://127.0.0.1:8080. SCENARIO=leak auto-runs on startup.
+serve:
+	PYTHONPATH=src $(PY) -m cryoguard.server --scenario $(SCENARIO)
 
 ## Start the SIMULATED PLC (Modbus-TCP 5020) and BMC (Redfish 8443).
 sims:

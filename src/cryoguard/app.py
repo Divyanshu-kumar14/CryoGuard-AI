@@ -19,7 +19,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="CryoGuard AI vertical slice")
     parser.add_argument("--scenario", default="leak", help="leak | condensation | glint | hidden")
     parser.add_argument(
-        "--headless", action="store_true", help="no dashboard (the only mode so far)"
+        "--headless", action="store_true", help="no dashboard (the default CLI mode)"
     )
     parser.add_argument("--out", default=None, help="incident directory")
     parser.add_argument("--max-seconds", type=float, default=None, help="stop after N clip seconds")
@@ -46,7 +46,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if not args.headless:
-        print("the dashboard lands in Phase 9; run with --headless", file=sys.stderr)
+        print(
+            "the dashboard runs as a separate process: make serve (http://127.0.0.1:8080)",
+            file=sys.stderr,
+        )
         return 2
 
     cfg = load(ROOT / "configs" / "default.yaml")

@@ -18,7 +18,7 @@ dist/
 htmlcov/
 
 # Generated at runtime; incidents are re-creatable, benchmark reports are not (keep reports/)
-artifacts/incidents/*.json
+artifacts/incidents/
 artifacts/checkpoints/*
 
 # OS / editor

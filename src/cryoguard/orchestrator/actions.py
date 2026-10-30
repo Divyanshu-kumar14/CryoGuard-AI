@@ -12,13 +12,17 @@ orchestrator produces the facts; the composition root turns them into a report.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, TypeAlias
 
 
 class Clock(Protocol):
     def now(self) -> float: ...
     def advance(self, seconds: float) -> float: ...
+
+
+StepCallback: TypeAlias = Callable[["SequenceStep", int], None]
 
 
 class IncidentClosed(RuntimeError):
@@ -41,10 +45,11 @@ class SequenceStep:
 
 
 class ActionLog:
-    def __init__(self, clock: Clock) -> None:
+    def __init__(self, clock: Clock, on_step: StepCallback | None = None) -> None:
         self._clock = clock
         self._steps: list[SequenceStep] = []
         self._sealed = False
+        self._on_step = on_step
 
     @property
     def sealed(self) -> bool:
@@ -71,6 +76,11 @@ class ActionLog:
             )
         step = SequenceStep(ts=ts, actor=actor, command=command, status=status, detail=detail)
         self._steps.append(step)
+        if self._on_step is not None:
+            # The observer runs after the step is durable in the log. It must not
+            # be able to veto or reorder an actuation; EventBus.publish swallows
+            # delivery failures for exactly this reason.
+            self._on_step(step, len(self._steps))
         return step
 
     def seal(self) -> tuple[SequenceStep, ...]:

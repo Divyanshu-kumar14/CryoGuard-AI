@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from cryoguard.models import IncidentState, ValveStatus
-from cryoguard.orchestrator.actions import ActionLog, Clock, SequenceStep
+from cryoguard.orchestrator.actions import ActionLog, Clock, SequenceStep, StepCallback
 
 TERMINAL = {
     IncidentState.RESOLVED_PENDING_REPAIR,
@@ -148,6 +148,7 @@ class ConfirmedLeakOrchestrator:
         bmc: BmcPort,
         scheduler: SchedulerPort,
         clamp_latency_ms: float = 0.0,
+        on_step: StepCallback | None = None,
     ) -> None:
         self.clock = clock
         self.nvml = nvml
@@ -156,7 +157,8 @@ class ConfirmedLeakOrchestrator:
         self.bmc = bmc
         self.scheduler = scheduler
         self.clamp_latency_ms = clamp_latency_ms
-        self.log = ActionLog(clock)
+        self.on_step = on_step
+        self.log = ActionLog(clock, on_step)
 
     @property
     def steps(self) -> tuple[SequenceStep, ...]:
@@ -190,7 +192,7 @@ class ConfirmedLeakOrchestrator:
     def run(self) -> IncidentFSM:
         """Run one incident; the log is sealed on every exit path, success or not."""
 
-        self.log = ActionLog(self.clock)
+        self.log = ActionLog(self.clock, self.on_step)
         fsm = IncidentFSM()
         fsm.fire("decision", self.clock.now())
         try:
