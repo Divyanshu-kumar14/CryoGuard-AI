@@ -13,6 +13,7 @@ import os
 import platform
 from pathlib import Path
 
+import cv2
 import numpy as np
 import yaml
 
@@ -57,8 +58,6 @@ def submit(self, warped_bgr, frame_index, t_s):  # type: ignore[no-untyped-def]
 
 sw.SamWorker.submit = submit  # type: ignore[method-assign]
 
-import cv2
-
 print(
     "DIAG ENV "
     + json.dumps(
@@ -69,8 +68,11 @@ print(
             "opencv": cv2.__version__,
             "opencv_file": cv2.__file__,
             "numpy": np.__version__,
-            "cpu": [line.strip() for line in cv2.getBuildInformation().splitlines()
-                    if "CPU/HW" in line or "CPU baseline" in line or "Parallel" in line],
+            "cpu": [
+                line.strip()
+                for line in cv2.getBuildInformation().splitlines()
+                if "CPU/HW" in line or "CPU baseline" in line or "Parallel" in line
+            ],
         }
     ),
     flush=True,
