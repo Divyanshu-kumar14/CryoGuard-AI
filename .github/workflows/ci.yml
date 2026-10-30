@@ -17,3 +17,6 @@ jobs:
         run: make check
       - name: Benchmark drift
         run: make bench-check
+      - name: Diagnostic (temporary)
+        continue-on-error: true
+        run: PYTHONPATH=src .venv/bin/python scripts/diag_sam_keys.py 2>&1 | grep -E "^DIAG" | head -14
