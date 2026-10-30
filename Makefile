@@ -2,7 +2,7 @@ PY := .venv/bin/python
 RUFF := .venv/bin/ruff
 MYPY := .venv/bin/mypy
 
-.PHONY: setup lint format typecheck test check export
+.PHONY: setup lint format typecheck test check export fixtures probe
 
 ## Create the pinned environment from uv.lock. uv owns the venv; .python-version pins 3.11.
 setup:
@@ -28,3 +28,11 @@ check: lint typecheck test
 ## Judges get a plain requirements file; uv.lock remains the source of truth.
 export:
 	uv export --format requirements-txt --no-hashes --no-emit-project -o requirements.txt
+
+## Regenerate the SIMULATED fixture clips and their manifest.
+fixtures:
+	PYTHONPATH=src $(PY) scripts/make_sim_fixtures.py
+
+## Measure the tracker on one clip, e.g. make probe CLIP=fixtures/videos/simulated/sim_leak_qd4.mp4
+probe:
+	PYTHONPATH=src $(PY) scripts/probe_clip.py $(CLIP)

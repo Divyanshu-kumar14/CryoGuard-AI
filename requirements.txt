@@ -2,6 +2,12 @@
 #    uv export --format requirements-txt --no-hashes --no-emit-project -o requirements.txt
 annotated-types==0.8.0
     # via pydantic
+numpy==2.2.6
+    # via
+    #   cryoguard
+    #   opencv-contrib-python
+opencv-contrib-python==4.12.0.88
+    # via cryoguard
 pydantic==2.14.2
     # via cryoguard
 pydantic-core==2.50.2

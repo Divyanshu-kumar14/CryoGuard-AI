@@ -3,6 +3,8 @@ name = "cryoguard"
 version = "0.1.0"
 requires-python = "==3.11.*"
 dependencies = [
+  "numpy==2.2.6",
+  "opencv-contrib-python==4.12.0.88",
   "pydantic==2.14.2",
   "pyyaml==6.0.3",
 ]
@@ -18,7 +20,10 @@ dev = [
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-markers = ["acceptance: P0 acceptance suite"]
+markers = [
+  "acceptance: P0 acceptance suite",
+  "slow: touches video fixtures",
+]
 
 [tool.ruff]
 line-length = 100
@@ -26,6 +31,9 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["cryoguard", "support"]
 
 [tool.mypy]
 python_version = "3.11"

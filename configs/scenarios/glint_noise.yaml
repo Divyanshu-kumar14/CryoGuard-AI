@@ -1,6 +1,7 @@
-# Scenario 3 — dry chassis, moving torches and indicator flicker. Must produce no
-# persistent candidate and no actuation (temporal-variance rejection).
-clip: "fixtures/videos/scenario_03_glint_noise.mp4"
+# Scenario 3 — SIMULATED dry chassis with specular glints and a short saturated blink.
+# Must produce no persistent candidate and no actuation (temporal persistence + growth gate).
+clip: "fixtures/videos/simulated/sim_glint.mp4"
+provenance: "synthetic"
 t0_offset_s: 0.0
 expected:
   label: "SUSPECT_LEAK"     # may raise suspicion from glare; must not trip

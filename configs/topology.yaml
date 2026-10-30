@@ -10,7 +10,14 @@ chassis:
   aruco:
     dictionary: "DICT_5X5_100"
     marker_size_mm: 100
-    ids: [0, 1, 2, 3]
+    min_markers: 2               # one marker = 4 points = no redundancy, no error estimate
+    # 30 mm of white quiet zone on every side; a 100 mm marker centred at 50 mm
+    # would sit flush with the chassis edge and be undetectable.
+    markers:
+      - {id: 0, center_mm: [80, 80]}
+      - {id: 1, center_mm: [520, 80]}
+      - {id: 2, center_mm: [520, 320]}
+      - {id: 3, center_mm: [80, 320]}
 
 zones:
   - id: 0

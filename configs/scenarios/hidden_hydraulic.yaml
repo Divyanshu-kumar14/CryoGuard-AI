@@ -1,6 +1,7 @@
-# Scenario 4 — hydraulic event outside the camera field of view. No visual evidence.
-# Per D-11 this is DRAIN-only and human-in-loop: no autonomous valve actuation.
-clip: "fixtures/videos/scenario_04_hidden_hydraulic.mp4"
+# Scenario 4 — SIMULATED hydraulic event outside the camera field of view. No visual evidence.
+# Per D-11 this is scheduler-drain only and human-in-loop: no autonomous valve actuation.
+clip: "fixtures/videos/simulated/sim_hidden_hydraulic.mp4"
+provenance: "synthetic"
 t0_offset_s: 0.0
 expected:
   label: "HIDDEN_HYDRAULIC_EVENT"

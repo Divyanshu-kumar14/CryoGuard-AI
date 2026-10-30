@@ -1,6 +1,7 @@
-# Scenario 1 — real fluorescent leak at QD-04, spreading toward the electrical plane.
+# Scenario 1 — SIMULATED fluorescent leak at QD-04, spreading toward the electrical plane.
 # Telemetry is scripted simulation synchronized to video time, not wall clock.
-clip: "fixtures/videos/scenario_01_active_leak.mp4"
+clip: "fixtures/videos/simulated/sim_leak_qd4.mp4"
+provenance: "synthetic"
 t0_offset_s: 0.0
 expected:
   label: "CONFIRMED_LEAK"

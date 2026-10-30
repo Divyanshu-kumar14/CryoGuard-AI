@@ -15,6 +15,7 @@ system:
 
 camera:
   fps: 30
+  px_per_mm: 2.0              # rectified canvas scale: 1200 x 800 for a 600 x 400 mm face
   health:
     brightness_min: 20.0
     brightness_max: 235.0
@@ -26,6 +27,14 @@ perception:
   idle_hz: 2                   # D-18
   track_hz: 5
   suspect_hz: 10
+  # Fluorescence gate for a long-pass filtered camera under UV excitation.
+  hue_min: 25                  # OpenCV hue, 0-179; yellow-green tracer
+  hue_max: 95
+  sat_min: 80
+  value_min: 60
+  morph_open_px: 3
+  morph_close_px: 5
+  growth_window: 5             # samples in the dA/dt least-squares slope
   min_area_mm2: 4.0
   max_area_mm2: 5000.0
   link_radius_mm: 25.0
