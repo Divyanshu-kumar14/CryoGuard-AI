@@ -31,6 +31,22 @@ def _client(handler) -> httpx.Client:
     return httpx.Client(transport=httpx.MockTransport(handler))
 
 
+def test_the_bmc_token_is_read_as_x_auth_token(cfg, monkeypatch) -> None:
+    monkeypatch.setenv("CRYOGUARD_BMC_TOKEN", "session-token-for-test")
+
+    client = RedfishClient(cfg["bmc"])
+
+    assert client.headers["X-Auth-Token"] == "session-token-for-test"
+
+
+def test_a_missing_bmc_token_sends_no_auth_header(cfg, monkeypatch) -> None:
+    monkeypatch.delenv("CRYOGUARD_BMC_TOKEN", raising=False)
+
+    client = RedfishClient(cfg["bmc"])
+
+    assert "X-Auth-Token" not in client.headers
+
+
 def test_a_503_is_retried_and_the_second_attempt_wins(cfg) -> None:
     calls = {"post": 0}
 

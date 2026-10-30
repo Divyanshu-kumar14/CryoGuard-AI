@@ -37,6 +37,14 @@ def prompts() -> PromptBook:
     return load_prompts(ROOT / "configs" / "prompts.yaml")
 
 
+@pytest.fixture(autouse=True)
+def clear_provider_env(monkeypatch) -> None:
+    """A developer's .env must not decide what these tests assert."""
+
+    for name in ("BASETEN_API_KEY", "MUSE_API_KEY", "BASETEN_BASE_URL", "BASETEN_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+
+
 def evidence() -> EvidenceModel:
     return EvidenceModel(
         label="CONFIRMED_LEAK",
@@ -101,7 +109,7 @@ def test_without_a_key_no_request_is_made(cfg, prompts, tmp_path, monkeypatch) -
     client = MuseClient(cfg["report"], prompts=prompts, proof_log=proof)
 
     assert client.available is False
-    with pytest.raises(MuseUnavailable, match="MUSE_API_KEY is not set"):
+    with pytest.raises(MuseUnavailable, match="BASETEN_API_KEY"):
         asyncio.run(
             client.explain(
                 incident_id="INC-RACK-08B-20261030-01",
@@ -112,6 +120,54 @@ def test_without_a_key_no_request_is_made(cfg, prompts, tmp_path, monkeypatch) -
             )
         )
     assert not proof.exists(), "no request was made, so no proof line may exist"
+
+
+def test_baseten_env_overrides_the_config_and_is_the_primary_key(cfg, prompts, monkeypatch) -> None:
+    monkeypatch.setenv("BASETEN_API_KEY", "baseten-key")
+    monkeypatch.setenv("MUSE_API_KEY", "legacy-key")
+    monkeypatch.setenv("BASETEN_BASE_URL", "https://example.invalid/v1")
+    monkeypatch.setenv("BASETEN_MODEL", "test-model")
+
+    client = MuseClient(cfg["report"], prompts=prompts)
+
+    assert client.available is True
+    assert client.provider == "baseten"
+    assert client.model == "test-model"
+    assert client.base_url == "https://example.invalid/v1"
+    assert client.client.api_key == "baseten-key"
+
+
+def test_muse_api_key_remains_a_compatibility_fallback(cfg, prompts, monkeypatch) -> None:
+    monkeypatch.setenv("MUSE_API_KEY", "legacy-key")
+
+    client = MuseClient(cfg["report"], prompts=prompts)
+
+    assert client.available is True
+    assert client.client.api_key == "legacy-key"
+    assert client.model == cfg["report"]["model"]
+    assert client.base_url == cfg["report"]["base_url"]
+
+
+def test_the_env_model_is_used_in_the_request_and_the_proof(
+    cfg, prompts, tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("BASETEN_MODEL", "test-model")
+    fake, completions = fake_client(reply())
+    proof = tmp_path / "proof.jsonl"
+    client = MuseClient(cfg["report"], client=fake, prompts=prompts, proof_log=proof)
+
+    asyncio.run(
+        client.explain(
+            incident_id="INC-RACK-08B-20261030-01",
+            label="CONFIRMED_LEAK",
+            evidence=evidence(),
+            actions=actions(),
+            fixture_source="synthetic",
+        )
+    )
+
+    assert completions.calls[0]["model"] == "test-model"
+    assert json.loads(proof.read_text(encoding="utf-8").strip())["model"] == "test-model"
 
 
 def test_a_valid_reply_is_one_request_with_usage_and_latency(cfg, prompts, tmp_path) -> None:
@@ -344,6 +400,29 @@ def test_a_broken_report_service_returns_the_fallback(cfg, monkeypatch) -> None:
             raise RuntimeError("bug in the report service")
 
     monkeypatch.setattr("cryoguard.pipeline.MuseClient", lambda section: Broken())
+    original = _fallback_report()
+
+    result = asyncio.run(
+        _explained_report(
+            report=original,
+            cfg=cfg,
+            evidence=evidence(),
+            actions=actions(),
+            label="CONFIRMED_LEAK",
+            fixture_source="synthetic",
+            trip_reason=None,
+        )
+    )
+
+    assert result is original
+    assert result.report_source == "deterministic_fallback"
+
+
+def test_a_broken_client_constructor_returns_the_fallback(cfg, monkeypatch) -> None:
+    def broken(_section):
+        raise RuntimeError("bad provider configuration")
+
+    monkeypatch.setattr("cryoguard.pipeline.MuseClient", broken)
     original = _fallback_report()
 
     result = asyncio.run(

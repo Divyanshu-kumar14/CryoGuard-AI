@@ -130,7 +130,7 @@ ui/               zero-build dashboard
 | Modbus-TCP / Redfish clients | Exercised against loopback simulators over real sockets |
 | NVML | Fake backend in the demo; real `pynvml` path is not tested on a GPU |
 | Hosted SAM 3.1 | Not called: no `META_API_KEY`; cache entries are `provenance=fixture` |
-| Live Muse Spark Open | Not called: no `MUSE_API_KEY`; fallback and mocked transports are tested |
+| Live Muse Spark Open on Baseten | Not called: no `BASETEN_API_KEY`; fallback and mocked transports are tested |
 | Physical capture | Not present: no camera, UV excitation, filter, or tracer |
 
 ## Configuration
@@ -143,8 +143,10 @@ Dashboard runtime settings are in `configs/dashboard.yaml`, separate so a port
 change cannot invalidate the safety freeze.
 
 Secrets are local-only. Copy `.env.example` to `.env` and fill only the keys you
-are using: `META_API_KEY` for live SAM, `MUSE_API_KEY` for the report model, and
-optional `CRYOGUARD_BMC_TOKEN` for a real Redfish BMC. `.env` is gitignored;
+are using: `META_API_KEY` for live SAM, `BASETEN_API_KEY` for the Muse Spark
+Open report (with optional `BASETEN_BASE_URL` and `BASETEN_MODEL`), and optional
+`CRYOGUARD_BMC_TOKEN` for a real Redfish BMC. `MUSE_API_KEY` remains a
+compatibility alias. `.env` is gitignored;
 `make demo` and `make serve` load it automatically, and the process environment
 wins over the file. `make env-check` prints presence, never a value. No secret is
 committed, and the library/tests/benchmark never load `.env`.

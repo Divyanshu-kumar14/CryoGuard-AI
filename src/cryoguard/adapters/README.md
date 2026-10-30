@@ -134,6 +134,44 @@ below `t_junction_max_c`. The R1 sequence (`orchestrator/emergency.py`) is valve
 close → scheduler cordon → power cut. It has no checkpoint wait and no requeue,
 and it seals its action log on every exit path.
 
+## BMC token
+
+`CRYOGUARD_BMC_TOKEN` is a **Redfish session token**, sent as `X-Auth-Token`
+(not `Authorization: Bearer`, and not Basic auth). The loopback mock ignores it,
+so the demo needs no token.
+
+For a real BMC:
+
+1. Create a dedicated service account in the BMC web UI. For
+   `ComputerSystem.Reset` with `ForceOff`, it needs the vendor's chassis
+   power-control privilege. The label varies by vendor (iDRAC, iLO, XCC,
+   Supermicro); grant the minimum role that includes power control.
+2. Open a Redfish session and read the `X-Auth-Token` response header:
+
+   ```bash
+   curl -k -sS -D - -o /dev/null \
+     -H 'Content-Type: application/json' \
+     -d '{"UserName":"cryoguard","Password":"..."}' \
+     https://BMC_IP/redfish/v1/SessionService/Sessions
+   ```
+
+   Some vendors return the session id in the body or `Location`; this client
+   only sends the `X-Auth-Token` header. `-k` is only for a BMC with a
+   self-signed certificate; the Python client uses normal TLS verification, so
+   install the BMC CA in the trust store instead of disabling it.
+3. Put the token in `.env` and confirm presence without printing it:
+
+   ```bash
+   # CRYOGUARD_BMC_TOKEN=...
+   make env-check
+   ```
+
+4. Set `bmc.simulated: false` and point `bmc.base_url` at the BMC. Session
+   tokens expire on the BMC's idle timeout and this client does not refresh
+   them; use a short-lived token for a demo or a credential broker in production.
+
+Do not commit the token and do not paste it into a chat.
+
 ## Known limits
 
 - `RealNvml` is not exercised in CI; this host has no NVIDIA device and

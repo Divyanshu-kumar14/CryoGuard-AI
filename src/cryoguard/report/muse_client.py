@@ -132,22 +132,29 @@ class MuseClient:
         proof_log: str | Path | None = None,
     ) -> None:
         self.cfg = cfg
-        self.model = str(cfg["model"])
+        self.model = os.environ.get("BASETEN_MODEL") or str(cfg["model"])
+        self.base_url = os.environ.get("BASETEN_BASE_URL") or str(cfg["base_url"])
         self.provider = str(cfg.get("provider", "baseten"))
         self.timeout_s = float(cfg["timeout_ms"]) / 1000.0
         self.max_tokens = int(cfg.get("max_tokens", 600))
         self.key_env = str(cfg.get("api_key_env", "MUSE_API_KEY"))
+        self.primary_key_env = "BASETEN_API_KEY"
         self.prompts = prompts or load_prompts(_resolve(cfg.get("prompts", "configs/prompts.yaml")))
         log_path = proof_log if proof_log is not None else cfg.get("proof_log")
         self.proof_log = _resolve(log_path) if log_path else None
 
-        key = api_key if api_key is not None else os.environ.get(self.key_env)
+        key: str | None
+        if api_key is not None:
+            key = api_key
+        else:
+            # Baseten is the provider; MUSE_API_KEY remains a compatibility alias.
+            key = os.environ.get(self.primary_key_env) or os.environ.get(self.key_env)
         self._key_present = bool(key)
         self.client = client
         if self.client is None and key:
             self.client = AsyncOpenAI(
                 api_key=key,
-                base_url=str(cfg["base_url"]),
+                base_url=self.base_url,
                 timeout=self.timeout_s,
                 max_retries=int(cfg.get("max_retries", 1)),
             )
@@ -215,7 +222,9 @@ class MuseClient:
         trip_reason: str | None = None,
     ) -> MuseResult:
         if not self.available:
-            raise MuseUnavailable(f"{self.key_env} is not set; no request was made")
+            raise MuseUnavailable(
+                f"{self.primary_key_env} (or {self.key_env}) is not set; no request was made"
+            )
 
         facts = incident_facts(
             incident_id=incident_id,

@@ -21,7 +21,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parents[2]
-CREDENTIALS = ("META_API_KEY", "MUSE_API_KEY", "CRYOGUARD_BMC_TOKEN")
+CREDENTIALS = ("META_API_KEY", "BASETEN_API_KEY", "MUSE_API_KEY", "CRYOGUARD_BMC_TOKEN")
+PROVIDER_SETTINGS = ("BASETEN_BASE_URL", "BASETEN_MODEL")
 
 
 def load_env(path: str | Path | None = None) -> Path | None:
@@ -56,6 +57,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"env file: {loaded if loaded is not None else 'not found'}")
     for name, present in credential_status().items():
         print(f"{name}: {'present' if present else 'absent'}")
+    for name in PROVIDER_SETTINGS:
+        state = "configured" if os.environ.get(name) else "default from configs/default.yaml"
+        print(f"{name}: {state}")
     print(
         "note: the process environment overrides .env; live SAM also needs "
         "sam.mode=live, and the report model is optional."

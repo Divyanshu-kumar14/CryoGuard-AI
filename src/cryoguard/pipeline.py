@@ -899,11 +899,11 @@ async def _explained_report(
     if not allow_llm or not bool(section.get("enabled", True)):
         return report
 
-    client = MuseClient(section)
-    if not client.available:
-        return report
-
     try:
+        client = MuseClient(section)
+        if not client.available:
+            return report
+
         result = await client.explain(
             incident_id=report.incident_id,
             label=label,

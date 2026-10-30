@@ -5,7 +5,7 @@ Two sources, one schema, one write.
 | Source | When | What the reader gets |
 | :-- | :-- | :-- |
 | `deterministic_fallback` | always, built first | every sentence from measured values in the incident |
-| `llm` | `MUSE_API_KEY` is set and the endpoint answers valid JSON | adds `rootCauseExplanation`, `llmUncertainty`, `llmModel` |
+| `llm` | `BASETEN_API_KEY` (or `MUSE_API_KEY`) is set and the endpoint answers valid JSON | adds `rootCauseExplanation`, `llmUncertainty`, `llmModel` |
 
 The deterministic report is not a toggle: it is constructed before any network
 call, and it is what ships if the model is absent, slow, malformed, or broken
@@ -53,7 +53,7 @@ the request. Per-label instructions:
 
 | Failure | Result | Proof line |
 | :-- | :-- | :-- |
-| `MUSE_API_KEY` absent | fallback, no request | none (nothing was called) |
+| `BASETEN_API_KEY` and `MUSE_API_KEY` absent | fallback, no request | none (nothing was called) |
 | request times out | fallback | `status: timeout` |
 | HTTP/transport error | fallback, no retry beyond the SDK | `status: error` |
 | invalid JSON | one repair retry | `status: malformed`, then `ok` or `malformed` |
@@ -68,12 +68,24 @@ key is available in this environment.
 
 ## Enabling a live call
 
+Baseten serves Muse Spark Open through an OpenAI-compatible endpoint. The
+defaults are already in `configs/default.yaml`; the environment can override
+them without touching the frozen safety config.
+
 ```bash
 cp .env.example .env             # .env is gitignored
-# edit .env: MUSE_API_KEY=...    # never commit or paste the value into chat
+# edit .env:
+#   BASETEN_API_KEY=...          # never commit or paste the value into chat
+#   BASETEN_BASE_URL=https://inference.baseten.co/v1
+#   BASETEN_MODEL=meta-models/muse-spark-open-1026
 make env-check                   # prints present/absent, never the value
 make demo SCENARIO=leak
 ```
+
+`BASETEN_API_KEY` is the primary key; `MUSE_API_KEY` remains a compatibility
+alias and `BASETEN_API_KEY` wins when both are set. `BASETEN_BASE_URL` and
+`BASETEN_MODEL` are non-secret overrides; without them the config values are
+used. The proof log records `provider: baseten` and the resolved model id.
 
 `make demo` and `make serve` load `.env` automatically; a real process
 environment variable wins over the file. The incident then carries
