@@ -12,6 +12,7 @@ Order is fixed and first-match wins.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from cryoguard.fusion.engine import leak_score
@@ -19,8 +20,41 @@ from cryoguard.models import Decision, Evidence, SystemLabel
 
 EMERGENCY = ("VALVE_CLOSE", "FORCE_OFF", "SCHEDULER_DRAIN")
 
+# Evidence is produced by bounded feature functions. A value outside these
+# ranges is a bug upstream, not a quiet tick: fail loudly instead of letting a
+# NaN comparison fall through to NOMINAL.
+_BOUNDED = (
+    ("phi_v", 0.0, 1.0),
+    ("phi_h", 0.0, 1.0),
+    ("phi_t", -1.0, 1.0),
+    ("W", 0.0, 1.0),
+    ("q", 0.0, 1.0),
+)
+
+
+class DecisionError(ValueError):
+    """Evidence is non-finite or outside its physical bounds."""
+
+
+def _validate(ev: Evidence) -> None:
+    for name, low, high in _BOUNDED:
+        value = float(getattr(ev, name))
+        if not math.isfinite(value) or not low <= value <= high:
+            raise DecisionError(f"{name} must be finite in [{low}, {high}], got {value!r}")
+    if not math.isfinite(ev.dA_dt):
+        raise DecisionError(f"dA_dt must be finite, got {ev.dA_dt!r}")
+    if not math.isfinite(ev.temp_c):
+        raise DecisionError(f"temp_c must be finite, got {ev.temp_c!r}")
+    if ev.zone < -1:
+        raise DecisionError(f"zone must be -1 (no candidate) or a zone id, got {ev.zone!r}")
+    if ev.ticks < 0:
+        raise DecisionError(f"ticks must be non-negative, got {ev.ticks!r}")
+    if ev.hydraulic_low_ms < 0:
+        raise DecisionError(f"hydraulic_low_ms must be non-negative, got {ev.hydraulic_low_ms!r}")
+
 
 def decide(ev: Evidence, cfg: dict[str, Any]) -> Decision:
+    _validate(ev)
     fusion = cfg["fusion"]
     thresholds = fusion["thresholds"]
     rules = cfg["decision"]

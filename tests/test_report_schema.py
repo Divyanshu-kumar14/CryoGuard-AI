@@ -7,9 +7,9 @@ from datetime import UTC, datetime
 
 import pytest
 
-from cryoguard.orchestrator.incident import INCIDENT_ID_PATTERN
 from cryoguard.report.fallback import build_fallback_report
 from cryoguard.report.schema import ActionModel, EvidenceModel, IncidentReport
+from cryoguard.report.writer import INCIDENT_ID_PATTERN
 
 TS = datetime(2026, 10, 30, 0, 0, 7, 800_000, tzinfo=UTC)
 

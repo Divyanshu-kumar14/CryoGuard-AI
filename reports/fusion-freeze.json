@@ -1,0 +1,73 @@
+{
+  "camera_health": {
+    "brightness_max": 235.0,
+    "brightness_min": 20.0,
+    "focus_min": 15.0,
+    "max_frame_age_s": 0.1,
+    "saturation_max": 0.35
+  },
+  "config_hash": "9269ab5328f80b78",
+  "decision": {
+    "benign_phi_h_max": 0.1,
+    "deescalation_ms": 1500,
+    "deescalation_ticks": 5,
+    "growth_epsilon_mm2_per_s": 0.5,
+    "hydraulic_confirm_phi": 0.2,
+    "hydraulic_hold_ms": 3000,
+    "hysteresis_ticks": 3,
+    "zone": {
+      "electrical": 2,
+      "origin": 0
+    }
+  },
+  "frozen_at": "2026-10-30T14:50:54.326Z",
+  "fusion": {
+    "hydraulic": {
+      "flow_imbalance_ref_lpm": 0.5,
+      "pressure_rate_ref_psi_per_s": 2.0,
+      "w_flow": 0.4,
+      "w_pressure": 0.6
+    },
+    "thermal": {
+      "dt_scale_c": 5.0
+    },
+    "thresholds": {
+      "confirmed_leak": 0.85,
+      "deescalation_margin": 0.05,
+      "escalation_cutoff": 0.7,
+      "nominal_cutoff": 0.4,
+      "suspect_cutoff": 0.5,
+      "zone2_trip": 0.5
+    },
+    "visual": {
+      "alpha": 0.4,
+      "beta": 0.4,
+      "contrast_max": 1.0,
+      "gamma": 0.2,
+      "growth_ref_mm2_per_s": 2.0
+    },
+    "weights": {
+      "bias": -2.8,
+      "w_hydraulic": 2.1,
+      "w_thermal": 1.25,
+      "w_visual": 1.85,
+      "w_wetness": 2.5
+    }
+  },
+  "fusion_hash": "c344fd0ed0d94555",
+  "hash_note": "fusion_hash covers the frozen subset and is enforced by tests/test_fusion_freeze.py; config_hash is the full config at freeze time, recorded for traceability only",
+  "perception_gates": {
+    "candidate_ttl_ticks": 3,
+    "exposure_clip_max": 0.05,
+    "growth_window": 5,
+    "max_area_mm2": 5000.0,
+    "min_area_mm2": 4.0,
+    "q_min": 0.5,
+    "solidity_ref": 0.6,
+    "wetness_ticks": 3
+  },
+  "schema_version": "1.0",
+  "source": "hand-set design priors (D-03); no fitting was performed",
+  "spec": "PRD v1.1 §6.3 + prd-delta-v1.2 §4",
+  "strict_freeze": true
+}

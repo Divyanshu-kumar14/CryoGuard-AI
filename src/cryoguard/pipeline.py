@@ -32,7 +32,6 @@ from cryoguard.orchestrator.adapters import (
     SimulatedNvml,
     SimulatedPlc,
 )
-from cryoguard.orchestrator.incident import write_incident
 from cryoguard.orchestrator.incident_fsm import ConfirmedLeakOrchestrator
 from cryoguard.perception.candidates import Candidate, CandidateManager
 from cryoguard.perception.health import assess_health
@@ -41,6 +40,7 @@ from cryoguard.perception.sam_worker import SamStats, SamWorker
 from cryoguard.perception.sampling import SamplingPolicy
 from cryoguard.report.fallback import build_fallback_report, scenario_clock
 from cryoguard.report.schema import ActionModel, EvidenceModel, IncidentReport
+from cryoguard.report.writer import write_incident
 from cryoguard.telemetry.replay import TelemetryReplay, TelemetrySample
 
 ROOT = Path(__file__).resolve().parents[2]

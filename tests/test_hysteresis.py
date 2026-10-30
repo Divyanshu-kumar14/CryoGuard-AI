@@ -79,3 +79,29 @@ def test_high_band_survives_the_rule_refining(cfg) -> None:
     decision = engine.update(leak_evidence(q=1.0), t_s=0.4)  # gate now passes
 
     assert decision.rule_id == "R2"
+
+
+def test_confirmed_leak_latches_and_never_walks_back(cfg) -> None:
+    engine = HysteresisDecision(cfg)
+    for tick in range(3):
+        decision = engine.update(leak_evidence(), t_s=tick * 0.2)
+    assert decision.label is SystemLabel.CONFIRMED_LEAK
+
+    calm = engine.update(leak_evidence(phi_v=0.0, phi_h=0.0, W=0.0, dA_dt=0.0, q=1.0), t_s=1.0)
+    assert calm.label is SystemLabel.CONFIRMED_LEAK
+    assert engine.latched is not None
+
+    engine.reset()
+    assert engine.update(leak_evidence(phi_v=0.0, phi_h=0.0, W=0.0, dA_dt=0.0), 1.2).label is (
+        SystemLabel.NOMINAL
+    )
+
+
+def test_emergency_trip_latches(cfg) -> None:
+    engine = HysteresisDecision(cfg)
+    for tick in range(3):
+        decision = engine.update(leak_evidence(zone=2), t_s=tick * 0.2)
+    assert decision.label is SystemLabel.EMERGENCY_TRIP
+
+    calm = engine.update(leak_evidence(zone=2, phi_v=0.0, phi_h=0.0, W=0.0, dA_dt=0.0), 1.0)
+    assert calm.label is SystemLabel.EMERGENCY_TRIP

@@ -96,7 +96,6 @@ fusion:
     # numerically irrelevant. Defined here as a growth RATE reference.
     growth_ref_mm2_per_s: 2.0
     contrast_max: 1.0
-    var_divisor: 65025.0       # 255^2: keeps Var(I) in [0,1]
 
   hydraulic:
     w_pressure: 0.6

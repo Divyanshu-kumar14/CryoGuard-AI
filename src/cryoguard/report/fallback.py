@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from cryoguard.orchestrator.incident import incident_id
 from cryoguard.report.schema import ActionModel, EvidenceModel, IncidentReport
+from cryoguard.report.writer import incident_id
 
 _RECOMMENDATIONS = {
     "CONFIRMED_LEAK": (

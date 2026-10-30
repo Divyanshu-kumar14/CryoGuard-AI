@@ -15,24 +15,32 @@ from dataclasses import replace
 from typing import Any
 
 from cryoguard.fusion.decision import decide
-from cryoguard.models import Decision, Evidence
+from cryoguard.models import Decision, Evidence, SystemLabel
 
 
 class HysteresisDecision:
+    LATCHED = {SystemLabel.CONFIRMED_LEAK, SystemLabel.EMERGENCY_TRIP}
+
     def __init__(self, cfg: dict[str, Any]) -> None:
         self.cfg = cfg
         self._key: tuple[str, str] | None = None
         self._count = 0
         self._first_t = 0.0
+        self._latched: Decision | None = None
 
     @property
     def streak(self) -> int:
         return self._count
 
+    @property
+    def latched(self) -> Decision | None:
+        return self._latched
+
     def reset(self) -> None:
         self._key = None
         self._count = 0
         self._first_t = 0.0
+        self._latched = None
 
     @staticmethod
     def _band(rule_id: str) -> str:
@@ -43,6 +51,13 @@ class HysteresisDecision:
         return rule_id
 
     def update(self, ev: Evidence, t_s: float) -> Decision:
+        # An incident never auto-de-escalates (PRD §6.4, T-DEC-03). The latch is
+        # explicit state, not a consequence of the pipeline returning early, so a
+        # future streaming loop cannot quietly walk a confirmed leak back to
+        # NOMINAL. Only an operator reset() clears it.
+        if self._latched is not None:
+            return self._latched
+
         instantaneous = decide(replace(ev, ticks=1), self.cfg)
         key = (self._band(instantaneous.rule_id), instantaneous.label.value)
 
@@ -53,4 +68,7 @@ class HysteresisDecision:
         else:
             self._count += 1
 
-        return decide(replace(ev, ticks=self._count), self.cfg)
+        decision = decide(replace(ev, ticks=self._count), self.cfg)
+        if decision.label in self.LATCHED:
+            self._latched = decision
+        return decision
