@@ -1,0 +1,23 @@
+{
+  "image": {
+    "height": 240,
+    "width": 200
+  },
+  "key": "27ad854c91a089e97dbbab3aaa464ef090b8bb7dbfec9b6d4f83db87568d19ee",
+  "masks": [
+    {
+      "bbox_px": [
+        94,
+        114,
+        200,
+        137
+      ],
+      "mask_file": "27ad854c91a089e97dbbab3aaa464ef090b8bb7dbfec9b6d4f83db87568d19ee.png",
+      "score": 1.0
+    }
+  ],
+  "model": "sam-3.1",
+  "prompt": "fluorescent yellow liquid droplet",
+  "provenance": "fixture",
+  "schema_version": "1.0"
+}
