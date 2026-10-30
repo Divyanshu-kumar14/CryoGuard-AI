@@ -47,7 +47,12 @@ def submit(self, warped_bgr, frame_index, t_s):  # type: ignore[no-untyped-def]
     if record["due"] and crop is not None:
         from cryoguard.perception.sam_client import cache_key, encode_png
 
-        key = cache_key(encode_png(np.ascontiguousarray(crop)), self.prompt, self.client.model)
+        png = encode_png(np.ascontiguousarray(crop))
+        key = cache_key(png, self.prompt, self.client.model)
+        record["png_sha"] = hashlib.sha256(png).hexdigest()[:16]
+        record["png_len"] = len(png)
+        record["prompt"] = self.prompt
+        record["model"] = self.client.model
         record["key"] = key
         record["present"] = (CACHE / f"{key}.json").is_file()
         record["crop_sha"] = sha(crop)
