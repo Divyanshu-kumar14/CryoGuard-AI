@@ -1,0 +1,15 @@
+# Scenario 1 — real fluorescent leak at QD-04, spreading toward the electrical plane.
+# Telemetry is scripted simulation synchronized to video time, not wall clock.
+clip: "fixtures/videos/scenario_01_active_leak.mp4"
+t0_offset_s: 0.0
+expected:
+  label: "CONFIRMED_LEAK"
+  zone: 2
+  qd: "QD-04"
+channels:
+  # t, pressure_psi, flow_in_lpm, flow_out_lpm, surface_c, air_c, rh_pct
+  pressure: [[0, 34.0], [4, 33.8], [8, 32.6], [12, 30.9], [16, 29.4]]
+  flow: [[0, 9.0, 9.0], [8, 9.0, 8.6], [16, 9.0, 8.1]]
+  surface_temp: [[0, 42.0], [16, 41.2]]
+  ambient: [[0, 24.0, 45.0], [16, 24.0, 45.0]]
+fault_injection: {}

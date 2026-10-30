@@ -1,0 +1,37 @@
+# Chassis-plane geometry in millimetres. PLACEHOLDER VALUES: replace with the
+# measured rig before any millimetre claim is made (D-19). Zone polygons already
+# include the 20 mm electrical margin (PRD §6.1).
+
+schema_version: "1.0"
+
+chassis:
+  width_mm: 600
+  height_mm: 400
+  aruco:
+    dictionary: "DICT_5X5_100"
+    marker_size_mm: 100
+    ids: [0, 1, 2, 3]
+
+zones:
+  - id: 0
+    name: "Hydraulic origin"
+    polygon_mm: [[40, 60], [240, 60], [240, 220], [40, 220]]
+  - id: 1
+    name: "Containment buffer"
+    polygon_mm: [[20, 240], [280, 240], [280, 320], [20, 320]]
+  - id: 2
+    name: "Electrical hazard plane"
+    margin_mm: 20
+    polygon_mm: [[300, 40], [580, 40], [580, 360], [300, 360]]
+
+qd:
+  - id: "QD-04"
+    branch: "BRANCH-SEC-02"
+    roi_mm: [60, 90, 140, 170]     # x0, y0, x1, y1
+    zone: 0
+
+nodes:
+  - id: "gpu-node-08b"
+    gpus: ["GPU-0", "GPU-1", "GPU-2", "GPU-3"]
+  - id: "gpu-node-09a"
+    gpus: ["GPU-0", "GPU-1", "GPU-2", "GPU-3"]

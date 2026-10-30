@@ -1,0 +1,14 @@
+# Scenario 2 — clear water beads under the same excitation. No fluorescence, so the
+# optical channel must not produce a persistent connected coolant candidate (D-08).
+clip: "fixtures/videos/scenario_02_condensation.mp4"
+t0_offset_s: 0.0
+expected:
+  label: "NOMINAL"          # must stay below 0.40 and trigger zero actuation
+  zone: 1
+  qd: "QD-04"
+channels:
+  pressure: [[0, 34.0], [16, 34.0]]
+  flow: [[0, 9.0, 9.0], [16, 9.0, 9.0]]
+  surface_temp: [[0, 18.0], [16, 18.0]]     # below dew point by design
+  ambient: [[0, 26.0, 70.0], [16, 26.0, 70.0]]
+fault_injection: {}

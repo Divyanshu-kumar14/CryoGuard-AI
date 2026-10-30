@@ -1,0 +1,30 @@
+# Secrets — only .env.example is tracked
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Generated at runtime; incidents are re-creatable, benchmark reports are not (keep reports/)
+artifacts/incidents/*.json
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# NOTE: artifacts/sam_cache/ and fixtures/ are deliberately NOT ignored.
+# The SAM cache must ship so `make bench` runs offline and byte-identically
+# for judges, and the fixtures are the only real signal in the project.

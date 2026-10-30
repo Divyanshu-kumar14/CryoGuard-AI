@@ -1,0 +1,14 @@
+# Scenario 3 — dry chassis, moving torches and indicator flicker. Must produce no
+# persistent candidate and no actuation (temporal-variance rejection).
+clip: "fixtures/videos/scenario_03_glint_noise.mp4"
+t0_offset_s: 0.0
+expected:
+  label: "SUSPECT_LEAK"     # may raise suspicion from glare; must not trip
+  zone: 2
+  qd: "QD-04"
+channels:
+  pressure: [[0, 34.0], [16, 34.0]]
+  flow: [[0, 9.0, 9.0], [16, 9.0, 9.0]]
+  surface_temp: [[0, 40.0], [16, 40.0]]
+  ambient: [[0, 24.0, 45.0], [16, 24.0, 45.0]]
+fault_injection: {}

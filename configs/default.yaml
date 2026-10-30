@@ -1,0 +1,163 @@
+# CryoGuard AI — default configuration.
+# Every value is a design prior or a stated physical assumption. None is a measured
+# result. The file is hashed at startup and the hash goes into every incident.
+
+schema_version: "1.0"
+
+system:
+  rack_id: "RACK-08B"
+  branch_id: "BRANCH-SEC-02"
+  sampling_rate_hz: 5          # NFR-LAT-01: decision tick is fixed at 5 Hz
+  camera_source: "fixtures/videos/scenario_01_active_leak.mp4"
+  rectify_enabled: true
+  allow_uncalibrated: false    # delta C-07: identity homography is dev-only
+  maintenance_mode: false      # Zone 2 is never suppressed (FR-DEC-05)
+
+camera:
+  fps: 30
+  health:
+    brightness_min: 20.0
+    brightness_max: 235.0
+    focus_min: 15.0            # Laplacian variance
+    saturation_max: 0.05       # clipped-pixel fraction
+    max_frame_age_s: 0.1
+
+perception:
+  idle_hz: 2                   # D-18
+  track_hz: 5
+  suspect_hz: 10
+  min_area_mm2: 4.0
+  max_area_mm2: 5000.0
+  link_radius_mm: 25.0
+  candidate_ttl_ticks: 3       # FR-PER-05: shorter-lived candidates are GLINT_NOISE
+  compactness_ref: 0.6
+  q_min: 0.5                   # mask quality gate for R1/R2
+
+sam:
+  model: "sam-3.1"
+  base_url: "https://api.meta.ai/v1"
+  timeout_sec: 4.0
+  async_rate_hz: 1.0           # D-02: <= 2 Hz
+  in_flight: 1
+  prompt_max_tokens: 32        # hosted API limit
+  cache_dir: "artifacts/sam_cache"
+  prompts:
+    coolant: "fluorescent yellow liquid droplet"
+    condensation: "water bead on metal"
+
+telemetry:
+  dt_s: 0.2
+  baseline_s: 10.0
+  pressure_min_psi: 20.0
+  pressure_max_psi: 45.0
+  flow_min_lpm: 5.0
+  flow_max_lpm: 15.0
+  surface_temp_min_c: 15.0
+  surface_temp_max_c: 50.0
+  air_temp_min_c: 20.0
+  air_temp_max_c: 30.0
+  rh_min_pct: 20.0
+  rh_max_pct: 80.0
+
+fusion:
+  # Canonical weights, PRD §9. Hand-set priors (D-03): never described as calibrated.
+  weights:
+    w_visual: 1.85
+    w_hydraulic: 2.10
+    w_thermal: 1.25
+    w_wetness: 2.50
+    bias: -2.80
+
+  visual:
+    alpha: 0.4
+    beta: 0.4
+    gamma: 0.2
+    # PRD §7.3 divides dA/dt by A_ref but leaves A_ref as an area. At 50 mm2 the
+    # growth term contributes ~2% of phi_v, which makes the anti-glint signal
+    # numerically irrelevant. Defined here as a growth RATE reference.
+    growth_ref_mm2_per_s: 2.0
+    contrast_max: 1.0
+    var_divisor: 65025.0       # 255^2: keeps Var(I) in [0,1]
+
+  hydraulic:
+    w_pressure: 0.6
+    w_flow: 0.4
+    pressure_rate_ref_psi_per_s: 2.0
+    flow_imbalance_ref_lpm: 0.5
+
+  thermal:
+    # PRD FR-FUS-01: phi_t = (T_surface - T_dewpoint) / dt_scale_c. Neutral at the
+    # dew point itself; no extra margin, because that point is physical.
+    dt_scale_c: 5.0
+
+  thresholds:
+    nominal_cutoff: 0.40
+    suspect_cutoff: 0.50
+    escalation_cutoff: 0.70
+    confirmed_leak: 0.85
+    zone2_trip: 0.50
+    deescalation_margin: 0.05
+
+decision:
+  hysteresis_ticks: 3
+  hold_ms:
+    r1: 600
+    r2: 600
+    r4: 3000
+  deescalation_ticks: 5
+  deescalation_ms: 1500
+  growth_epsilon_mm2_per_s: 0.5   # delta R-1: a static reflection must not trip
+  hydraulic_confirm_phi: 0.20
+  benign_phi_h_max: 0.10           # R5 condensation branch
+  zone:
+    origin: 0
+    electrical: 2
+
+orchestrator:
+  clamp_readback_timeout_ms: 2000
+  clamp_tolerance_w: 5.0
+  valve_verified_ms: 1200
+  valve_fault_ms: 1500
+  checkpoint_budget_ms: 30000
+  bmc_graceful_timeout_ms: 10000
+  watchdog_period_ms: 100
+
+nvml:
+  backend: "fake"
+  fake_min_limit_w: 200.0
+  fake_num_gpus: 4
+
+plc:
+  host: "127.0.0.1"
+  port: 5020                  # 502 requires root; documented in README
+  unit_id: 1
+  valve_travel_ms: 950
+
+bmc:
+  base_url: "http://127.0.0.1:8443"   # mock only, no TLS, no auth, host-local
+
+thermal_model:
+  c_th_j_per_k: 350.0      # assumption, not a measurement (PRD D-07)
+  q_load_w: 1000.0
+  q_idle_w: 200.0
+  t_junction_max_c: 105.0
+  watchdog_limit_c: 90.0
+
+scheduler:
+  kind: "slurm-mock"
+  standby_node: "gpu-node-09a"
+  job_id: "train-llm-0427"
+
+report:
+  provider: "baseten"
+  model: "meta-models/muse-spark-open-1026"
+  base_url: "https://inference.baseten.co/v1"
+  timeout_ms: 15000
+  max_retries: 1
+  fallback_enabled: true
+
+bench:
+  split: "test"
+  repeats: 3
+  confidence: 0.95
+  seed: 427
