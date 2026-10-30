@@ -63,8 +63,10 @@ the request. Per-label instructions:
 The proof log is `report.proof_log` (default
 `artifacts/open_weights_proof.jsonl`), one JSON object per request with model id,
 provider, latency, token counts, and status. A line is only written when a
-request was actually attempted — the repository ships no proof line, because no
-key is available in this environment.
+request was actually attempted. The committed log records four real Baseten
+attempts that returned empty `content` at the old 600-token cap and one `ok`
+attempt at the 2400-token override (`reportSource: llm`). Unit tests always use
+a temporary proof file, so they cannot add fake `ok` lines here.
 
 ## Enabling a live call
 
@@ -78,6 +80,7 @@ cp .env.example .env             # .env is gitignored
 #   BASETEN_API_KEY=...          # never commit or paste the value into chat
 #   BASETEN_BASE_URL=https://inference.baseten.co/v1
 #   BASETEN_MODEL=meta-models/muse-spark-open-1026
+#   BASETEN_MAX_TOKENS=2400      # reasoning headroom; 600 truncates content
 make env-check                   # prints present/absent, never the value
 make demo SCENARIO=leak
 ```
@@ -85,7 +88,10 @@ make demo SCENARIO=leak
 `BASETEN_API_KEY` is the primary key; `MUSE_API_KEY` remains a compatibility
 alias and `BASETEN_API_KEY` wins when both are set. `BASETEN_BASE_URL` and
 `BASETEN_MODEL` are non-secret overrides; without them the config values are
-used. The proof log records `provider: baseten` and the resolved model id.
+used. `BASETEN_MAX_TOKENS` defaults to the config's 600, but Muse Spark Open is a
+reasoning model: 600 tokens can be consumed before any JSON content is emitted,
+so set 2400 for a live report. The proof log records `provider: baseten` and the
+resolved model id.
 
 `make demo` and `make serve` load `.env` automatically; a real process
 environment variable wins over the file. The incident then carries

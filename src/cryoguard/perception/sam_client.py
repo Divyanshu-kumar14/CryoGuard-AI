@@ -13,10 +13,11 @@ Three modes, and they are not interchangeable:
 ``live``   call the API. A transport failure is reported, never swallowed; the
            classical tracker keeps the safety loop ticking while SAM is down.
 
-The response shape is parsed defensively because the hosted schema could not be
-confirmed without an API key (specs/preflight.md). The recorded fixture in
-``fixtures/sam/`` is a *schema* fixture, not a captured API response; the cache
-entry records ``provenance`` so no run can claim otherwise.
+The live response is streamed **special-token text**: one box and one mask per
+match, encoded as base85 and decoded with the official ``meta-sam-parser``
+package. The JSON fixture in ``fixtures/sam/`` remains a schema fixture for
+injected transports; the cache entry records ``provenance`` so no run can claim
+a fixture mask came from the API.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from typing import Any, Literal
 
 import cv2
 import numpy as np
+from meta_sam_parser import SegmentationMask, decode_mask_to_raster
 
 Provenance = Literal["api", "fixture"]
 
@@ -202,6 +204,88 @@ def parse_response(
     return tuple(_mask_from_entry(entry, image_shape, threshold) for entry in entries)
 
 
+# One record from the live Responses stream. The grammar is documented at
+# https://dev.meta.ai/docs/sam/reading-segmentation: object id, box token, mask
+# token. The mask payload is base85 bytes introduced by `~` (lossless) or `!`
+# (one_bit); `|` is outside the base85 alphabet used by the API.
+_SPECIAL_RECORD = re.compile(
+    r"(?P<object_id>\d+)"
+    r"<\|box;x1=(?P<x1>\d+);y1=(?P<y1>\d+);x2=(?P<x2>\d+);y2=(?P<y2>\d+);"
+    r"w=(?P<frame_w>\d+);h=(?P<frame_h>\d+)(?:;c=(?P<box_c>[0-9]+(?:\.[0-9]+)?))?\|>"
+    r"<\|mask;x=0;y=0(?:;c=(?P<mask_c>[0-9]+(?:\.[0-9]+)?))?;"
+    r"data=(?P<mask_h>\d+),(?P<mask_w>\d+),(?P<encoded>[~!][^|]*?)\|>"
+)
+
+
+def parse_sam_text(text: str, image_shape: tuple[int, int]) -> tuple[SamMask, ...]:
+    """Parse the live special-token lane into masks.
+
+    Zero matches is a valid outcome and is represented by an empty lane. A
+    non-empty lane with no parsable record is an error, so a refusal or a schema
+    drift cannot be mistaken for "nothing found".
+    """
+
+    if not text.strip():
+        return ()
+
+    masks: list[SamMask] = []
+    for match in _SPECIAL_RECORD.finditer(text):
+        height = int(match.group("mask_h"))
+        width = int(match.group("mask_w"))
+        encoded = match.group("encoded")
+        encoding: Literal["lossless", "one_bit"] = (
+            "lossless" if encoded.startswith("~") else "one_bit"
+        )
+        try:
+            raster = decode_mask_to_raster(
+                SegmentationMask(
+                    encoding=encoding,
+                    payload=encoded,
+                    width=width,
+                    height=height,
+                )
+            )
+        except Exception as exc:  # the official decoder raises its own error type
+            raise SamResponseError(f"mask payload did not decode: {exc}") from exc
+
+        if len(raster) != width * height:
+            raise SamResponseError(
+                f"mask raster is {len(raster)} bytes, expected "
+                f"{width * height} for {height}x{width}"
+            )
+        mask = np.frombuffer(raster, dtype=np.uint8).reshape(height, width) > 0
+        if mask.shape != image_shape:
+            mask = (
+                cv2.resize(
+                    mask.astype(np.uint8),
+                    (image_shape[1], image_shape[0]),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+                > 0
+            )
+
+        x0, y0, x1, y1 = (
+            int(match.group("x1")),
+            int(match.group("y1")),
+            int(match.group("x2")),
+            int(match.group("y2")),
+        )
+        x0, x1 = sorted((max(0, x0), min(image_shape[1], x1)))
+        y0, y1 = sorted((max(0, y0), min(image_shape[0], y1)))
+        score = float(match.group("mask_c") or match.group("box_c") or 1.0)
+        masks.append(
+            SamMask(
+                mask=mask,
+                bbox_px=(x0, y0, x1, y1),
+                score=max(0.0, min(1.0, score)),
+            )
+        )
+
+    if not masks:
+        raise SamResponseError("SAM output had text but no box/mask record")
+    return tuple(masks)
+
+
 class SamClient:
     def __init__(
         self,
@@ -329,10 +413,12 @@ class SamClient:
             )
         return self._client
 
-    def _call_api(self, image_bgr: np.ndarray, image_bytes: bytes, prompt: str) -> dict[str, Any]:
+    def _call_api(self, image_bgr: np.ndarray, image_bytes: bytes, prompt: str) -> str:
         data_url = "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii")
         try:
-            response = self._api().responses.create(
+            chunks: list[str] = []
+            completed = ""
+            with self._api().responses.stream(
                 model=self.model,
                 input=[
                     {
@@ -343,14 +429,21 @@ class SamClient:
                         ],
                     }
                 ],
-            )
+            ) as stream:
+                for event in stream:
+                    event_type = str(getattr(event, "type", ""))
+                    if event_type == "response.output_text.delta":
+                        chunks.append(str(getattr(event, "delta", "")))
+                    elif "refusal" in event_type:
+                        raise SamResponseError("SAM refused the segmentation request")
+                    elif event_type == "response.completed":
+                        response = getattr(event, "response", None)
+                        completed = str(getattr(response, "output_text", "") or "")
+            return "".join(chunks) or completed
+        except SamError:
+            raise
         except Exception as exc:  # openai raises a family of transport errors
             raise SamAPIError(f"{type(exc).__name__}: {exc}") from exc
-
-        payload = response.model_dump() if hasattr(response, "model_dump") else dict(response)
-        if not isinstance(payload, dict):
-            raise SamResponseError(f"unexpected response type: {type(payload)}")
-        return payload
 
     # -- public --------------------------------------------------------------
 
@@ -375,9 +468,9 @@ class SamClient:
 
         if self._transport is not None:
             payload = self._transport(image_bytes, prompt)
+            masks = parse_response(payload, image_bgr.shape[:2], self.threshold)
         else:
-            payload = self._call_api(image_bgr, image_bytes, prompt)
-
-        masks = parse_response(payload, image_bgr.shape[:2], self.threshold)
+            text = self._call_api(image_bgr, image_bytes, prompt)
+            masks = parse_sam_text(text, image_bgr.shape[:2])
         self.store(key, prompt, masks, "api", image_bgr.shape[:2])
         return SamResult(masks=masks, provenance="api", cached=False, cache_key=key, prompt=prompt)

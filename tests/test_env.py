@@ -85,6 +85,7 @@ def test_the_example_pins_the_baseten_endpoint_and_model() -> None:
 
     assert "BASETEN_BASE_URL=https://inference.baseten.co/v1" in text
     assert "BASETEN_MODEL=meta-models/muse-spark-open-1026" in text
+    assert "BASETEN_MAX_TOKENS=2400" in text
     assert "MUSE_API_KEY=" in text, "the compatibility alias must remain documented"
 
 
@@ -135,6 +136,7 @@ def test_the_presence_command_reports_provider_settings_without_values(
 ) -> None:
     monkeypatch.setenv("BASETEN_BASE_URL", "https://example.invalid/v1")
     monkeypatch.setenv("BASETEN_MODEL", "test-model")
+    monkeypatch.setenv("BASETEN_MAX_TOKENS", "2400")
     path = tmp_path / ".env"
     path.write_text("", encoding="utf-8")
 
@@ -143,5 +145,6 @@ def test_the_presence_command_reports_provider_settings_without_values(
 
     assert "BASETEN_BASE_URL: configured" in output
     assert "BASETEN_MODEL: configured" in output
+    assert "BASETEN_MAX_TOKENS: configured" in output
     assert "https://example.invalid/v1" not in output
     assert "test-model" not in output

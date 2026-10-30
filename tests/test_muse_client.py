@@ -41,7 +41,13 @@ def prompts() -> PromptBook:
 def clear_provider_env(monkeypatch) -> None:
     """A developer's .env must not decide what these tests assert."""
 
-    for name in ("BASETEN_API_KEY", "MUSE_API_KEY", "BASETEN_BASE_URL", "BASETEN_MODEL"):
+    for name in (
+        "BASETEN_API_KEY",
+        "MUSE_API_KEY",
+        "BASETEN_BASE_URL",
+        "BASETEN_MODEL",
+        "BASETEN_MAX_TOKENS",
+    ):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -168,6 +174,27 @@ def test_the_env_model_is_used_in_the_request_and_the_proof(
 
     assert completions.calls[0]["model"] == "test-model"
     assert json.loads(proof.read_text(encoding="utf-8").strip())["model"] == "test-model"
+
+
+def test_the_max_tokens_override_is_used(cfg, prompts, tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("BASETEN_MAX_TOKENS", "2400")
+    fake, completions = fake_client(reply())
+    client = MuseClient(
+        cfg["report"], client=fake, prompts=prompts, proof_log=tmp_path / "proof.jsonl"
+    )
+
+    asyncio.run(
+        client.explain(
+            incident_id="INC-RACK-08B-20261030-01",
+            label="CONFIRMED_LEAK",
+            evidence=evidence(),
+            actions=actions(),
+            fixture_source="synthetic",
+        )
+    )
+
+    assert client.max_tokens == 2400
+    assert completions.calls[0]["max_tokens"] == 2400
 
 
 def test_a_valid_reply_is_one_request_with_usage_and_latency(cfg, prompts, tmp_path) -> None:

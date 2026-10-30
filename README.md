@@ -129,8 +129,9 @@ ui/               zero-build dashboard
 | Deterministic replay and byte-identical incidents | Proven by tests and repeated runs |
 | Modbus-TCP / Redfish clients | Exercised against loopback simulators over real sockets |
 | NVML | Fake backend in the demo; real `pynvml` path is not tested on a GPU |
-| Hosted SAM 3.1 | Not called: no `META_API_KEY`; cache entries are `provenance=fixture` |
-| Live Muse Spark Open on Baseten | Not called: no `BASETEN_API_KEY`; fallback and mocked transports are tested |
+| Hosted SAM 3.1 | Live call authenticated and streamed; the official `meta-sam-parser` decoded real masks with `bright green blob` / `yellow-green glow` on the synthetic crop. The configured `fluorescent yellow liquid droplet` prompt returned a valid zero-match lane, so the demo still uses the fixture cache |
+| Live Muse Spark Open on Baseten | Called once through Baseten (`reportSource: llm`); the successful proof line is in `artifacts/open_weights_proof.jsonl` |
+| Real Redfish BMC | Not exercised: no BMC token or hardware; the loopback mock ignores auth |
 | Physical capture | Not present: no camera, UV excitation, filter, or tracer |
 
 ## Configuration
@@ -144,7 +145,8 @@ change cannot invalidate the safety freeze.
 
 Secrets are local-only. Copy `.env.example` to `.env` and fill only the keys you
 are using: `META_API_KEY` for live SAM, `BASETEN_API_KEY` for the Muse Spark
-Open report (with optional `BASETEN_BASE_URL` and `BASETEN_MODEL`), and optional
+Open report (with optional `BASETEN_BASE_URL`, `BASETEN_MODEL`, and
+`BASETEN_MAX_TOKENS=2400` for the reasoning model's headroom), and optional
 `CRYOGUARD_BMC_TOKEN` for a real Redfish BMC. `MUSE_API_KEY` remains a
 compatibility alias. `.env` is gitignored;
 `make demo` and `make serve` load it automatically, and the process environment

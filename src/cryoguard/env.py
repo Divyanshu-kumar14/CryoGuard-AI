@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parents[2]
 CREDENTIALS = ("META_API_KEY", "BASETEN_API_KEY", "MUSE_API_KEY", "CRYOGUARD_BMC_TOKEN")
-PROVIDER_SETTINGS = ("BASETEN_BASE_URL", "BASETEN_MODEL")
+PROVIDER_SETTINGS = ("BASETEN_BASE_URL", "BASETEN_MODEL", "BASETEN_MAX_TOKENS")
 
 
 def load_env(path: str | Path | None = None) -> Path | None:

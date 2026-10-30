@@ -136,7 +136,7 @@ class MuseClient:
         self.base_url = os.environ.get("BASETEN_BASE_URL") or str(cfg["base_url"])
         self.provider = str(cfg.get("provider", "baseten"))
         self.timeout_s = float(cfg["timeout_ms"]) / 1000.0
-        self.max_tokens = int(cfg.get("max_tokens", 600))
+        self.max_tokens = int(os.environ.get("BASETEN_MAX_TOKENS") or cfg.get("max_tokens", 600))
         self.key_env = str(cfg.get("api_key_env", "MUSE_API_KEY"))
         self.primary_key_env = "BASETEN_API_KEY"
         self.prompts = prompts or load_prompts(_resolve(cfg.get("prompts", "configs/prompts.yaml")))

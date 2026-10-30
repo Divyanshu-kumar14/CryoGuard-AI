@@ -34,6 +34,7 @@ httpx==0.28.1
     # via cryoguard
 httpx2==2.16.0
     # via openai
+hypothesis==6.170.14
 idna==3.20
     # via
     #   anyio
@@ -41,6 +42,8 @@ idna==3.20
     #   httpx2
 jiter==0.18.0
     # via openai
+meta-sam-parser==0.1.0
+    # via cryoguard
 numpy==2.2.6
     # via
     #   cryoguard
@@ -61,13 +64,17 @@ pydantic-core==2.50.2
 pymodbus==3.11.4
     # via cryoguard
 python-dotenv==1.2.4
-    # via uvicorn
+    # via
+    #   cryoguard
+    #   uvicorn
 pyyaml==6.0.3
     # via
     #   cryoguard
     #   uvicorn
 sniffio==1.3.1
     # via openai
+sortedcontainers==2.4.0
+    # via hypothesis
 starlette==1.10.0
     # via fastapi
 truststore==0.10.5 ; sys_platform != 'emscripten'
