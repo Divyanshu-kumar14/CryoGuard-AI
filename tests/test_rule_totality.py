@@ -203,3 +203,67 @@ def test_a_blind_camera_cannot_manufacture_a_hidden_hydraulic_event(cfg) -> None
         camera_healthy=False,
     )
     assert decide(ev, cfg).rule_id == "R8"
+
+
+@pytest.mark.parametrize(
+    "score, quality, expected",
+    [
+        (0.399999, 0.2, "R7"),
+        (0.40, 0.2, "R6"),
+        (0.499999, 0.2, "R6"),
+        (0.50, 0.2, "R5"),
+        (0.699999, 0.2, "R5"),
+        (0.70, 0.2, "R3"),
+        (0.849999, 0.2, "R3"),
+        (0.85, 0.2, "R2b"),
+        (0.85, 1.0, "R2"),
+    ],
+)
+def test_p_band_boundaries_are_half_open(
+    monkeypatch, cfg, score: float, quality: float, expected: str
+) -> None:
+    """Every cut is [low, high): 0.40/0.50/0.70/0.85 each land in exactly one band."""
+
+    monkeypatch.setattr("cryoguard.fusion.decision.leak_score", lambda *args, **kwargs: score)
+    ev = Evidence(
+        zone=0,
+        phi_v=0.66,
+        phi_h=0.41,
+        phi_t=0.0,
+        W=1.0,
+        dA_dt=20.0,
+        q=quality,
+        ticks=3,
+    )
+    assert decide(ev, cfg).rule_id == expected
+
+
+def test_zone_two_trip_boundary_is_half_open(monkeypatch, cfg) -> None:
+    monkeypatch.setattr("cryoguard.fusion.decision.leak_score", lambda *args, **kwargs: 0.50)
+    ev = Evidence(zone=2, phi_v=0.4, phi_h=0.0, phi_t=0.0, W=1.0, dA_dt=2.0, ticks=3)
+    assert decide(ev, cfg).rule_id == "R1"
+
+    monkeypatch.setattr("cryoguard.fusion.decision.leak_score", lambda *args, **kwargs: 0.499999)
+    assert decide(ev, cfg).rule_id == "R6"
+
+
+@pytest.mark.parametrize(
+    "phi_v, phi_h",
+    [(0.1, 1.0), (1.0, 0.1)],
+)
+def test_thermal_and_score_alone_never_confirm(cfg, phi_v: float, phi_h: float) -> None:
+    """T-DEC-07: R2 needs phi_v >= 0.2 and phi_h >= 0.2, not just a high score."""
+
+    ev = Evidence(
+        zone=0,
+        phi_v=phi_v,
+        phi_h=phi_h,
+        phi_t=0.0,
+        W=1.0,
+        dA_dt=20.0,
+        q=1.0,
+        ticks=3,
+    )
+    decision = decide(ev, cfg)
+    assert decision.rule_id == "R2b"
+    assert not decision.actuates
