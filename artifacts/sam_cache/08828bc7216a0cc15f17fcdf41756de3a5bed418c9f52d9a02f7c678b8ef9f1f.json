@@ -1,0 +1,12 @@
+{
+  "image": {
+    "height": 240,
+    "width": 200
+  },
+  "key": "08828bc7216a0cc15f17fcdf41756de3a5bed418c9f52d9a02f7c678b8ef9f1f",
+  "masks": [],
+  "model": "sam-3.1",
+  "prompt": "fluorescent yellow liquid droplet",
+  "provenance": "fixture",
+  "schema_version": "1.0"
+}

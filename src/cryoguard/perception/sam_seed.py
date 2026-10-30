@@ -19,7 +19,7 @@ import numpy as np
 from cryoguard.capture.rectify import estimate, warp_to_canvas
 from cryoguard.capture.source import VideoSource
 from cryoguard.perception.fast_tracker import FastTracker
-from cryoguard.perception.sam_client import SamClient, SamMask, cache_key, encode_png
+from cryoguard.perception.sam_client import SamClient, SamMask, cache_key
 from cryoguard.perception.sam_worker import build_rois
 
 
@@ -58,7 +58,7 @@ def seed_fixture_cache(
             for roi in rois:
                 crop = np.ascontiguousarray(roi.crop(warped))
                 mask = tracker.mask_for(crop) > 0
-                key = cache_key(encode_png(crop), prompt, str(sam_cfg["model"]))
+                key = cache_key(crop, prompt, str(sam_cfg["model"]))
                 shape = (int(crop.shape[0]), int(crop.shape[1]))
 
                 if not mask.any():

@@ -2,8 +2,14 @@
 
 The hosted endpoint accepts a **text prompt on a crop** only (D-01); box and point
 prompts exist in the open-weight release and are not used here. A response is
-cached under ``sha256(image_bytes + prompt + model)`` exactly as NFR-DET-01
-specifies, so a warm cache makes a benchmark run 100% offline.
+cached under ``sha256(pixel bytes + prompt + model)`` as NFR-DET-01 specifies, so
+a warm cache makes a benchmark run 100% offline.
+
+The key hashes the **pixels**, never an encoded PNG. CI proved that two machines
+encode the same pixels to different (still lossless) deflate streams — 3895 bytes
+here, 3925 on the runner — which moved the key without the image changing. Pixel
+bytes are bit-identical across the runners and are the content the cache is
+actually keyed on.
 
 Three modes, and they are not interchangeable:
 
@@ -97,11 +103,17 @@ def validate_prompt(prompt: str, max_tokens: int) -> None:
         raise SamPromptError(f"prompt is {tokens} tokens, limit is {max_tokens}: {prompt!r}")
 
 
-def cache_key(image_bytes: bytes, prompt: str, model: str) -> str:
-    """NFR-DET-01: sha256(image_bytes + prompt_str + model_name)."""
+def cache_key(image_bgr: np.ndarray, prompt: str, model: str) -> str:
+    """NFR-DET-01: sha256(pixel bytes + prompt_str + model_name).
+
+    Raw pixels, in C order. Hashing an encoded PNG would make the key depend on
+    the compressor's runtime dispatch: the same crop encodes to different bytes
+    on different CPUs, so a cache seeded on one machine missed on another while
+    the image itself was byte-identical.
+    """
 
     digest = hashlib.sha256()
-    digest.update(image_bytes)
+    digest.update(np.ascontiguousarray(image_bgr).tobytes())
     digest.update(prompt.encode("utf-8"))
     digest.update(model.encode("utf-8"))
     return digest.hexdigest()
@@ -454,8 +466,9 @@ class SamClient:
             raise SamError(f"expected BGR HxWx3 crop, got {image_bgr.shape}")
 
         validate_prompt(prompt, self.prompt_max_tokens)
+        # The wire still carries a PNG; the key deliberately does not.
         image_bytes = encode_png(image_bgr)
-        key = cache_key(image_bytes, prompt, self.model)
+        key = cache_key(image_bgr, prompt, self.model)
 
         cached = self.load_cached(key, image_bgr.shape[:2])
         if cached is not None:

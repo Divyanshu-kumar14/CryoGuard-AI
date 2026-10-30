@@ -17,7 +17,6 @@ from cryoguard.perception.sam_client import (
     SamResponseError,
     cache_key,
     count_prompt_tokens,
-    encode_png,
     parse_response,
     validate_prompt,
 )
@@ -95,10 +94,16 @@ def test_a_payload_without_masks_fails_loudly() -> None:
         parse_response({"output": []}, MASK_SHAPE)
 
 
-def test_cache_key_is_the_documented_concatenation() -> None:
-    image = b"\x89PNG\r\n\x1a\nbody"
-    expected = hashlib.sha256(image + b"fluorescent droplet" + b"sam-3.1").hexdigest()
+def test_cache_key_hashes_raw_pixels_not_a_png_container() -> None:
+    """A PNG is not the content: the same pixels compress to different bytes on
+    different CPUs (CI proved it), so the key must not touch the encoder."""
+
+    image = np.zeros((4, 5, 3), dtype=np.uint8)
+    image[1, 2] = (10, 20, 30)
+    expected = hashlib.sha256(image.tobytes() + b"fluorescent droplet" + b"sam-3.1").hexdigest()
     assert cache_key(image, "fluorescent droplet", "sam-3.1") == expected
+    # Row-major C order, independent of the array's memory layout.
+    assert cache_key(image[::1], "fluorescent droplet", "sam-3.1") == expected
 
 
 def test_second_call_serves_from_cache_without_network(tmp_path: Path) -> None:
@@ -128,11 +133,7 @@ def test_cache_mode_never_falls_back_to_the_network(tmp_path: Path) -> None:
 def test_fixture_provenance_can_never_be_reported_as_api(tmp_path: Path) -> None:
     client = SamClient(sam_cfg(tmp_path, "live"), transport=CountingTransport(fixture_payload()))
     client.segment(crop(), "fluorescent yellow liquid droplet")
-    key = cache_key(
-        encode_png(crop()),
-        "fluorescent yellow liquid droplet",
-        "sam-3.1",
-    )
+    key = cache_key(crop(), "fluorescent yellow liquid droplet", "sam-3.1")
     metadata = json.loads((tmp_path / "sam_cache" / f"{key}.json").read_text())
     assert metadata["provenance"] == "api"
 
