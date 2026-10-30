@@ -34,6 +34,15 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="override sam.cache_dir (useful for a seeded fixture cache)",
     )
+    parser.add_argument(
+        "--protocols",
+        choices=("memory", "loopback", "external"),
+        default=None,
+        help=(
+            "orchestrator transports; loopback starts the SIMULATED PLC/BMC on "
+            "ephemeral sockets, external uses the configured ports"
+        ),
+    )
     args = parser.parse_args(argv)
 
     if not args.headless:
@@ -52,10 +61,12 @@ def main(argv: list[str] | None = None) -> int:
             max_seconds=args.max_seconds,
             sam_mode=args.sam,
             sam_cache_dir=args.sam_cache,
+            protocol_mode=args.protocols,
         )
     )
 
     print(f"scenario  {result.scenario} (SIMULATED)")
+    print(f"protocols {result.protocol_mode} (SIMULATED network mocks)")
     print(
         f"ticks     {result.ticks} at {result.tick_rate_hz:.0f} Hz "
         f"({result.rate_changes} rate changes)"
@@ -76,6 +87,8 @@ def main(argv: list[str] | None = None) -> int:
 
     decision = result.decision
     print(f"decision  {decision.rule_id} {decision.label.value} p={decision.p:.3f}")
+    if result.sequence_state is not None:
+        print(f"sequence  {result.sequence_state.value}")
     print(f"actions   {len(result.report.deterministic_actions_taken)}")
     print(f"incident  {result.path}")
     return 0

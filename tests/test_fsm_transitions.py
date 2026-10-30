@@ -11,6 +11,7 @@ from cryoguard.orchestrator.incident_fsm import (
     ConfirmedLeakOrchestrator,
     IllegalTransition,
     IncidentFSM,
+    PowerResult,
     ValveResult,
 )
 
@@ -35,7 +36,7 @@ class FakeNvml:
 
     def clamp(self) -> ClampResult:
         self.calls.append("clamp")
-        return ClampResult(ok=self.ok, applied_w=self.applied_w)
+        return ClampResult(ok=self.ok, applied_w=self.applied_w, detail="fake")
 
 
 class FakePlc:
@@ -47,7 +48,7 @@ class FakePlc:
     def close_valve(self) -> ValveResult:
         self.calls.append("valve")
         self.ever_called = True
-        return ValveResult(status=self.status, travel_ms=950.0)
+        return ValveResult(status=self.status, travel_ms=950.0, detail="fake", nominal_ms=950.0)
 
 
 class FakeCheckpoint:
@@ -59,7 +60,41 @@ class FakeCheckpoint:
     def start(self) -> CheckpointResult:
         self.calls.append("checkpoint")
         started = self.clock.now()
-        return CheckpointResult(started_at=started, ready_at=started + self.settle_after_s, step=42)
+        return CheckpointResult(
+            started_at=started,
+            ready_at=started + self.settle_after_s,
+            step=42,
+            reason="fake checkpoint",
+        )
+
+
+class FakeBmc:
+    def __init__(self, calls: list[str], ok: bool = True) -> None:
+        self.calls = calls
+        self.ok = ok
+
+    def force_off(self) -> PowerResult:
+        self.calls.append("bmc")
+        return PowerResult(ok=self.ok, state="Off" if self.ok else "On", simulated=True)
+
+
+class FakeScheduler:
+    def __init__(self, calls: list[str]) -> None:
+        self.calls = calls
+        self.drained = False
+        self.requeued = False
+        self.checkpoint_step = 0
+
+    def drain(self) -> str:
+        self.calls.append("drain")
+        self.drained = True
+        return "DRAINED"
+
+    def requeue(self, checkpoint_step: int) -> str:
+        self.calls.append("requeue")
+        self.requeued = True
+        self.checkpoint_step = checkpoint_step
+        return "gpu-node-09a"
 
 
 def build(
@@ -68,22 +103,28 @@ def build(
     clamp_ok: bool = True,
     valve: ValveStatus = ValveStatus.VERIFIED,
     settle: float = 30.0,
+    bmc_ok: bool = True,
 ):
     calls: list[str] = []
+    plc = FakePlc(calls, status=valve)
+    bmc = FakeBmc(calls, ok=bmc_ok)
+    scheduler = FakeScheduler(calls)
     orch = ConfirmedLeakOrchestrator(
         clock=clock,
         nvml=FakeNvml(calls, ok=clamp_ok),
-        plc=FakePlc(calls, status=valve),
+        plc=plc,
         checkpoint=FakeCheckpoint(calls, clock, settle),
+        bmc=bmc,
+        scheduler=scheduler,
     )
-    return orch, calls
+    return orch, calls, plc, bmc, scheduler
 
 
 def test_clamp_is_verified_before_the_valve_moves() -> None:
-    orch, calls = build(FakeClock())
+    orch, calls, _, _, _ = build(FakeClock())
     fsm = orch.run()
 
-    assert calls == ["checkpoint", "clamp", "valve"]
+    assert calls[:3] == ["checkpoint", "clamp", "valve"]
     assert fsm.state is IncidentState.RESOLVED_PENDING_REPAIR
 
 
@@ -91,7 +132,7 @@ def test_isolation_does_not_wait_for_the_checkpoint() -> None:
     """Delta C-04: the valve is what stops the coolant. It cannot queue behind I/O."""
 
     clock = FakeClock()
-    orch, _ = build(clock, settle=30.0)
+    orch, _, _, _, _ = build(clock, settle=30.0)
     fsm = orch.run()
 
     assert fsm.timestamp("valve_closed") < fsm.timestamp("checkpoint_settled")
@@ -111,29 +152,89 @@ def test_power_off_is_refused_until_the_checkpoint_settles() -> None:
 
 def test_failed_clamp_hard_trips_without_ever_commanding_the_valve() -> None:
     clock = FakeClock()
-    calls: list[str] = []
-    plc = FakePlc(calls)
-    orch = ConfirmedLeakOrchestrator(
-        clock=clock,
-        nvml=FakeNvml(calls, ok=False),
-        plc=plc,
-        checkpoint=FakeCheckpoint(calls, clock, 30.0),
-    )
+    orch, calls, plc, _, scheduler = build(clock, clamp_ok=False)
     fsm = orch.run()
 
     assert fsm.state is IncidentState.HARD_TRIP
     assert not plc.ever_called
+    assert calls == ["checkpoint", "clamp", "drain", "bmc"]
+    assert scheduler.drained
     assert "power_off" not in [name for name, _ in fsm.events]
+    assert [step.command for step in orch.steps] == ["CLAMP", "SCHEDULER_DRAIN", "FORCE_OFF"]
 
 
-def test_faulty_valve_reports_failed_safe_and_never_claims_isolation() -> None:
+def test_a_valve_fault_escalates_to_a_power_cut() -> None:
+    """T-FSM-04: a failed close is not isolation; cut power, then ask why."""
+
     clock = FakeClock()
-    orch, _ = build(clock, valve=ValveStatus.FAULT)
+    orch, calls, _, _, _ = build(clock, valve=ValveStatus.FAULT, bmc_ok=True)
+    fsm = orch.run()
+
+    assert fsm.state is IncidentState.HARD_TRIP
+    assert "valve_closed" not in [name for name, _ in fsm.events]
+    assert "power_off" not in [name for name, _ in fsm.events]
+    assert calls == ["checkpoint", "clamp", "valve", "drain", "bmc"]
+    assert [step.status for step in orch.steps] == [
+        "READBACK_VERIFIED",
+        "FAULT",
+        "DRAINED",
+        "ACCEPTED",
+    ]
+
+
+def test_a_valve_fault_with_a_failed_power_cut_is_failed_safe() -> None:
+    clock = FakeClock()
+    orch, _, _, _, _ = build(clock, valve=ValveStatus.FAULT, bmc_ok=False)
     fsm = orch.run()
 
     assert fsm.state is IncidentState.FAILED_SAFE
     assert "valve_closed" not in [name for name, _ in fsm.events]
+    assert [step.command for step in orch.steps] == [
+        "CLAMP",
+        "VALVE_CLOSE",
+        "SCHEDULER_DRAIN",
+        "FORCE_OFF",
+    ]
+    assert orch.steps[-1].status == "REJECTED"
+
+
+def test_a_slow_valve_still_isolates_and_is_reported_as_slow() -> None:
+    clock = FakeClock()
+    orch, _, _, _, _ = build(clock, valve=ValveStatus.VERIFIED_SLOW)
+    fsm = orch.run()
+
+    assert fsm.state is IncidentState.RESOLVED_PENDING_REPAIR
+    valve_step = next(step for step in orch.steps if step.command == "VALVE_CLOSE")
+    assert valve_step.status == "LIMIT_SWITCH_CLOSED_SLOW"
+
+
+def test_a_failed_power_cut_after_isolation_is_failed_safe() -> None:
+    clock = FakeClock()
+    orch, _, _, _, _ = build(clock, bmc_ok=False)
+    fsm = orch.run()
+
+    assert fsm.state is IncidentState.FAILED_SAFE
     assert "power_off" not in [name for name, _ in fsm.events]
+    assert "requeued" not in [name for name, _ in fsm.events]
+
+
+def test_actions_are_ordered_and_complete() -> None:
+    clock = FakeClock()
+    orch, _, _, _, scheduler = build(clock)
+    fsm = orch.run()
+
+    assert fsm.state is IncidentState.RESOLVED_PENDING_REPAIR
+    assert [step.command for step in orch.steps] == [
+        "CLAMP",
+        "VALVE_CLOSE",
+        "SCHEDULER_DRAIN",
+        "CHECKPOINT_VERIFY",
+        "FORCE_OFF",
+        "REQUEUE",
+    ]
+    assert scheduler.checkpoint_step == 42
+    timestamps = [step.ts for step in orch.steps]
+    assert timestamps == sorted(timestamps)
 
 
 def test_terminal_states_reject_further_events() -> None:

@@ -229,15 +229,22 @@ The PRD's table left three states with no matching row. They are closed here:
 
 `ticks` counts consecutive ticks in the same **evidence band**. R2, R2b, and R2c
 share one `HIGH` band, so a rule refining from R2b to R2 when the quality gate
-passes does not restart the count.
+passes does not restart the count. A tick whose evidence does not match the held
+band resets that count without immediately de-escalating the state.
 
 `CONFIRMED_LEAK` and `EMERGENCY_TRIP` latch in `HysteresisDecision`. A later tick
 with calm evidence still returns the latched incident; only an operator
 `reset()` clears it (T-DEC-03).
 
-Non-incident bands follow the instantaneous table. The 5-tick de-escalation hold
-in PRD §6.4 is not yet implemented in the wrapper; because those bands never
-actuate, this affects logging cadence rather than hardware.
+Every other band de-escalates only after the score has stayed below that band's
+floor minus `deescalation_margin = 0.05` for `deescalation_ticks = 5` consecutive
+ticks. The floors are the thresholds that admit the band: `0.85` for the high
+band, `0.70` for R3, `0.50` for R5 and R4, and `0.40` for R6. R7 has no floor;
+R8 and hard faults are adopted immediately in both directions because a camera
+failure is not a suspicion score. A band change that is a *rise* is adopted
+immediately (the new band still has to satisfy its own tick gate to actuate).
+`tests/test_hysteresis.py` exercises a 12-tick scripted sequence, the strict
+`floor - margin` boundary, and the camera-failure exemption.
 
 R4 needs 3 s of continuous hydraulic evidence (`hydraulic_low_ms >= 3000`), which
 is longer than the 3-tick escalation used by R1/R2 because a hidden event has no

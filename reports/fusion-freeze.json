@@ -6,10 +6,9 @@
     "max_frame_age_s": 0.1,
     "saturation_max": 0.35
   },
-  "config_hash": "9269ab5328f80b78",
+  "config_hash": "c8b556955a4c0f22",
   "decision": {
     "benign_phi_h_max": 0.1,
-    "deescalation_ms": 1500,
     "deescalation_ticks": 5,
     "growth_epsilon_mm2_per_s": 0.5,
     "hydraulic_confirm_phi": 0.2,
@@ -20,7 +19,7 @@
       "origin": 0
     }
   },
-  "frozen_at": "2026-10-30T14:50:54.326Z",
+  "frozen_at": "2026-10-30T15:13:37.760Z",
   "fusion": {
     "hydraulic": {
       "flow_imbalance_ref_lpm": 0.5,
@@ -54,7 +53,7 @@
       "w_wetness": 2.5
     }
   },
-  "fusion_hash": "c344fd0ed0d94555",
+  "fusion_hash": "164849b04a9afb87",
   "hash_note": "fusion_hash covers the frozen subset and is enforced by tests/test_fusion_freeze.py; config_hash is the full config at freeze time, recorded for traceability only",
   "perception_gates": {
     "candidate_ttl_ticks": 3,

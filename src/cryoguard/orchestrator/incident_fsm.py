@@ -4,11 +4,16 @@ Two invariants, both tested:
   1. the valve is never commanded before the power clamp is verified by readback;
   2. isolation is reached on the limit switch alone - a pending checkpoint must
      not delay it (delta C-04). The checkpoint gates power-off, not isolation.
+
+Failure paths follow T-FSM-04: a clamp readback failure or a valve limit-switch
+FAULT escalates to a node power cut. Only when that cut also fails does the
+sequence exit ``FAILED_SAFE``. A valve that did not close is never reported as
+isolated, and a power cut that was not accepted is never reported as
+``NODE_POWERED_DOWN``.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -91,16 +96,38 @@ class CheckpointPort(Protocol):
     def start(self) -> CheckpointResult: ...
 
 
+class BmcPort(Protocol):
+    def force_off(self) -> PowerResult: ...
+
+
+class SchedulerPort(Protocol):
+    def drain(self) -> str: ...
+    def requeue(self, checkpoint_step: int) -> str: ...
+
+
 @dataclass(frozen=True)
 class ClampResult:
     ok: bool
     applied_w: float
+    detail: str = ""
 
 
 @dataclass(frozen=True)
 class ValveResult:
     status: ValveStatus
     travel_ms: float
+    detail: str = ""
+    nominal_ms: float = 0.0
+
+
+@dataclass(frozen=True)
+class PowerResult:
+    ok: bool
+    state: str
+    attempts: int = 0
+    status_code: int = 0
+    simulated: bool = True
+    detail: str = ""
 
 
 @dataclass(frozen=True)
@@ -108,6 +135,19 @@ class CheckpointResult:
     started_at: float
     ready_at: float
     step: int
+    reason: str = ""
+    verified: bool = True
+
+
+@dataclass(frozen=True)
+class SequenceStep:
+    """One executed action, in execution order, for the read-only incident log."""
+
+    ts: float
+    actor: str
+    command: str
+    status: str
+    detail: str = ""
 
 
 class ConfirmedLeakOrchestrator:
@@ -119,47 +159,135 @@ class ConfirmedLeakOrchestrator:
         nvml: NvmlPort,
         plc: PlcPort,
         checkpoint: CheckpointPort,
-        on_action: Callable[[str, str, float], None] | None = None,
+        bmc: BmcPort,
+        scheduler: SchedulerPort,
         clamp_latency_ms: float = 0.0,
     ) -> None:
         self.clock = clock
         self.nvml = nvml
         self.plc = plc
         self.checkpoint = checkpoint
-        self.on_action = on_action or (lambda *_: None)
+        self.bmc = bmc
+        self.scheduler = scheduler
         self.clamp_latency_ms = clamp_latency_ms
+        self.steps: list[SequenceStep] = []
+
+    def _record(self, actor: str, command: str, status: str, detail: str = "") -> SequenceStep:
+        step = SequenceStep(self.clock.now(), actor, command, status, detail)
+        self.steps.append(step)
+        return step
+
+    def _power_cut(self, reason: str) -> PowerResult:
+        power = self.bmc.force_off()
+        source = "SIMULATED" if power.simulated else "live"
+        status = "ACCEPTED" if power.ok else "REJECTED"
+        detail = f"{reason}; PowerState={power.state} ({source} BMC)"
+        if power.detail:
+            detail = f"{detail}; {power.detail}"
+        self._record("BMC", "FORCE_OFF", status, detail)
+        return power
+
+    def _cordon(self) -> None:
+        """Best-effort scheduler cordon. It must never delay the power cut."""
+
+        try:
+            drain_state = self.scheduler.drain()
+        except Exception as exc:  # the cordon is reversible; the power cut is not optional
+            self._record("SLURM", "SCHEDULER_DRAIN", "FAILED", f"{type(exc).__name__}: {exc}")
+            return
+        self._record("SLURM", "SCHEDULER_DRAIN", "DRAINED", f"State={drain_state} (mock)")
 
     def run(self) -> IncidentFSM:
+        self.steps.clear()
         fsm = IncidentFSM()
-        t0 = self.clock.now()
-        fsm.fire("decision", t0)
+        fsm.fire("decision", self.clock.now())
 
-        # Started first, settles independently - never blocks isolation.
-        checkpoint = self.checkpoint.start()
+        # Started first, settles independently - never blocks isolation. A corrupt
+        # or missing checkpoint is a failed branch, not a reason to leave coolant
+        # flowing; it gates the power-off later, not the clamp or the valve.
+        try:
+            checkpoint = self.checkpoint.start()
+        except Exception as exc:
+            checkpoint = CheckpointResult(
+                started_at=self.clock.now(),
+                ready_at=self.clock.now(),
+                step=-1,
+                reason=f"checkpoint verification failed: {type(exc).__name__}: {exc}",
+                verified=False,
+            )
+            self._record("STORAGE", "CHECKPOINT_VERIFY", "FAILED", checkpoint.reason)
 
         clamp = self.nvml.clamp()
-        self.on_action("NVML", "CLAMP", clamp.applied_w)
+        clamp_status = "READBACK_VERIFIED" if clamp.ok else "READBACK_FAILED"
+        self._record(
+            "NVML",
+            "CLAMP",
+            clamp_status,
+            clamp.detail or f"{clamp.applied_w:.0f} W",
+        )
         if not clamp.ok:
-            fsm.fire("hard_trip", self.clock.now())
+            self._cordon()
+            power = self._power_cut("clamp readback failed")
+            fsm.fire("hard_trip" if power.ok else "failed_safe", self.clock.now())
             return fsm
         self.clock.advance(self.clamp_latency_ms / 1000.0)
         fsm.fire("clamp_verified", self.clock.now())
 
         valve = self.plc.close_valve()
-        self.on_action("PLC", "VALVE_CLOSE", valve.travel_ms)
+        if valve.status is ValveStatus.FAULT:
+            valve_status = "FAULT"
+        elif valve.status is ValveStatus.VERIFIED_SLOW:
+            valve_status = "LIMIT_SWITCH_CLOSED_SLOW"
+        else:
+            valve_status = "LIMIT_SWITCH_CLOSED"
+        self._record(
+            "PLC",
+            "VALVE_CLOSE",
+            valve_status,
+            valve.detail or f"limit switch; band {valve.status.value}",
+        )
 
         # A FAULT means closure is unverified, so isolation was never achieved.
         # Claiming ISOLATED here would be the most dangerous lie in the sequence.
         if valve.status is ValveStatus.FAULT:
+            self._cordon()
+            power = self._power_cut("valve limit switch fault")
+            fsm.fire("hard_trip" if power.ok else "failed_safe", self.clock.now())
+            return fsm
+        # The scenario clock advances by the configured nominal travel, not the
+        # measured wall time, so two runs of the same clip produce the same
+        # incident. The measured value still selects the VERIFIED/SLOW/FAULT band.
+        self.clock.advance((valve.nominal_ms or valve.travel_ms) / 1000.0)
+        fsm.fire("valve_closed", self.clock.now())
+
+        # Cordon the node before the power cut so Slurm cannot reschedule the job
+        # onto the node that is about to go down. Reversible, not a valve.
+        self._cordon()
+
+        if not checkpoint.verified:
+            # Coolant is isolated, but there is no verified checkpoint to resume
+            # from. Do not power off and do not requeue; an operator resolves this.
             fsm.fire("failed_safe", self.clock.now())
             return fsm
-        self.clock.advance(valve.travel_ms / 1000.0)
-        fsm.fire("valve_closed", self.clock.now())
 
         # Isolation is already achieved; the checkpoint gates the power-off below.
         self.clock.advance(max(0.0, checkpoint.ready_at - self.clock.now()))
         fsm.fire("checkpoint_settled", self.clock.now())
+        self._record(
+            "STORAGE",
+            "CHECKPOINT_VERIFY",
+            "COMMITTED",
+            checkpoint.reason or f"step {checkpoint.step} hash-verified",
+        )
+
+        power = self._power_cut("confirmed leak")
+        if not power.ok:
+            fsm.fire("failed_safe", self.clock.now())
+            return fsm
         fsm.fire("power_off", self.clock.now())
+
+        node = self.scheduler.requeue(checkpoint.step)
+        self._record("SLURM", "REQUEUE", "REQUEUED", f"node={node}; step={checkpoint.step}")
         fsm.fire("requeued", self.clock.now())
         fsm.fire("closed", self.clock.now())
         return fsm

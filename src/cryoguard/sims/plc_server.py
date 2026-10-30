@@ -30,6 +30,7 @@ from pymodbus.datastore import (
 )
 from pymodbus.server import ModbusTcpServer
 
+from cryoguard.adapters.plc_client import status_for_travel
 from cryoguard.models import ValveStatus
 
 
@@ -42,16 +43,6 @@ class ValveState(StrEnum):
     CLOSING_COMMANDED = "CLOSING_COMMANDED"
     CLOSED = "CLOSED"
     FAULT = "FAULT"
-
-
-def status_for_travel(travel_ms: float, slow_ms: float, fault_ms: float) -> ValveStatus:
-    if travel_ms <= 0:
-        raise PlcError(f"valve travel must be positive: {travel_ms}")
-    if travel_ms <= slow_ms:
-        return ValveStatus.VERIFIED
-    if travel_ms <= fault_ms:
-        return ValveStatus.VERIFIED_SLOW
-    return ValveStatus.FAULT
 
 
 @dataclass(frozen=True)
@@ -224,6 +215,15 @@ class PlcModbusServer:
 
         self._server: ModbusTcpServer | None = None
         self._ticker: asyncio.Task[None] | None = None
+
+    @property
+    def bound_port(self) -> int:
+        if self._server is None:
+            raise PlcError("server is not running")
+        sockets = getattr(self._server.transport, "sockets", None)
+        if not sockets:
+            raise PlcError("server has no bound socket")
+        return int(sockets[0].getsockname()[1])
 
     async def start(self) -> None:
         if self._server is not None:

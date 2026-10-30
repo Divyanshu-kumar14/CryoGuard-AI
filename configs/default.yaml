@@ -119,8 +119,7 @@ fusion:
 decision:
   hysteresis_ticks: 3
   hydraulic_hold_ms: 3000       # R4 needs 3 s of hydraulic-only evidence
-  deescalation_ticks: 5
-  deescalation_ms: 1500
+  deescalation_ticks: 5         # PRD §6.4 is tick-based; no wall-clock knob
   growth_epsilon_mm2_per_s: 0.5   # delta R-1: a static reflection must not trip
   hydraulic_confirm_phi: 0.20
   benign_phi_h_max: 0.10           # R5 condensation branch
@@ -129,12 +128,15 @@ decision:
     electrical: 2
 
 orchestrator:
+  protocol_mode: "loopback"     # loopback | external | memory
   clamp_latency_ms: 40
   clamp_readback_timeout_ms: 2000
   clamp_tolerance_w: 5.0
   valve_verified_ms: 1200
   valve_fault_ms: 1500
   checkpoint_budget_ms: 30000
+  checkpoint_dir: "artifacts/checkpoints/demo"
+  checkpoint_step: 4200
   bmc_graceful_timeout_ms: 10000
   watchdog_period_ms: 100
 
@@ -154,12 +156,19 @@ plc:
   open_pressure_psi: 34.0
   nominal_flow_lpm: 9.0
   tick_ms: 20
+  poll_ms: 10                 # client poll interval while waiting for the limit switch
+  client_timeout_ms: 2000     # per-request Modbus timeout
 
 bmc:
   base_url: "http://127.0.0.1:8443"   # mock only, no TLS, no auth, host-local
   host: "127.0.0.1"
   port: 8443
   node_id: "gpu-node-08b"
+  simulated: true                     # set false only for a real BMC
+  timeout_ms: 2000
+  max_retries: 2
+  retry_backoff_ms: 50
+  token_env: "CRYOGUARD_BMC_TOKEN"    # optional; secrets only via the environment
 
 thermal_model:
   c_th_j_per_k: 350.0      # assumption, not a measurement (PRD D-07)

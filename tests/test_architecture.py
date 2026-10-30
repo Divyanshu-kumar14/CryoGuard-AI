@@ -18,7 +18,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src" / "cryoguard"
-SAFETY_PACKAGES = ("fusion", "orchestrator")
+SAFETY_PACKAGES = ("fusion", "orchestrator", "adapters")
 FORBIDDEN_PREFIXES = ("cryoguard.report", "openai")
 
 

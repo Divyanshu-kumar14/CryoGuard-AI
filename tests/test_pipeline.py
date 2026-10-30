@@ -9,7 +9,7 @@ import pytest
 import yaml
 
 from cryoguard.config import load
-from cryoguard.models import SystemLabel
+from cryoguard.models import IncidentState, SystemLabel
 from cryoguard.perception.sam_seed import seed_fixture_cache
 from cryoguard.pipeline import RunResult, load_scenario, run_scenario
 
@@ -35,7 +35,15 @@ def run(
     **kwargs,
 ) -> RunResult:
     return asyncio.run(
-        run_scenario(name, cfg, topology, out_dir=out_dir, max_seconds=seconds, **kwargs)
+        run_scenario(
+            name,
+            cfg,
+            topology,
+            out_dir=out_dir,
+            max_seconds=seconds,
+            checkpoint_dir=out_dir / "checkpoints",
+            **kwargs,
+        )
     )
 
 
@@ -57,6 +65,8 @@ def test_leak_clip_confirms_and_writes_an_incident(leak) -> None:
     assert leak.report is not None
     assert leak.path is not None and leak.path.is_file()
     assert leak.report.physical_evidence.zone == 0
+    assert leak.protocol_mode == "loopback"
+    assert leak.sequence_state is IncidentState.RESOLVED_PENDING_REPAIR
 
 
 @pytest.mark.slow
@@ -66,15 +76,16 @@ def test_safe_sequence_order_is_preserved_in_the_report(leak) -> None:
     assert commands == [
         "CLAMP",
         "VALVE_CLOSE",
+        "SCHEDULER_DRAIN",
         "CHECKPOINT_VERIFY",
         "FORCE_OFF",
-        "SCHEDULER_DRAIN",
         "REQUEUE",
     ]
 
     assert actions[0].t_s < actions[1].t_s  # clamp verified before the valve moves
-    assert actions[1].t_s < actions[2].t_s  # isolation before the checkpoint gate
+    assert actions[1].t_s <= actions[3].t_s  # isolation before the checkpoint gate
     assert actions[1].status == "LIMIT_SWITCH_CLOSED"
+    assert actions[3].detail.startswith("step 4200 hash-verified")
 
 
 @pytest.mark.slow

@@ -13,6 +13,7 @@ Order inside a tick matters:
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +21,11 @@ from typing import Any
 
 import yaml
 
+from cryoguard.adapters.loopback import SimEndpoints, loopback_simulators
+from cryoguard.adapters.nvml import build_nvml
+from cryoguard.adapters.plc_client import PlcClient
+from cryoguard.adapters.redfish_client import RedfishClient
+from cryoguard.adapters.scheduler import CheckpointAdapter, SchedulerAdapter
 from cryoguard.capture.rectify import estimate
 from cryoguard.capture.source import VideoSource
 from cryoguard.config import config_hash, get
@@ -28,11 +34,13 @@ from cryoguard.fusion.hysteresis import HysteresisDecision
 from cryoguard.models import Decision, Evidence, IncidentState, SystemLabel
 from cryoguard.orchestrator.adapters import (
     ScenarioClock,
+    SimulatedBmc,
     SimulatedCheckpoint,
     SimulatedNvml,
     SimulatedPlc,
+    SimulatedScheduler,
 )
-from cryoguard.orchestrator.incident_fsm import ConfirmedLeakOrchestrator
+from cryoguard.orchestrator.incident_fsm import ConfirmedLeakOrchestrator, SequenceStep
 from cryoguard.perception.candidates import Candidate, CandidateManager
 from cryoguard.perception.health import assess_health
 from cryoguard.perception.sam_client import SamClient
@@ -108,6 +116,8 @@ class RunResult:
     tick_rate_hz: float
     rate_changes: int
     sam: SamSummary | None
+    protocol_mode: str = "memory"
+    sequence_state: IncidentState | None = None
 
 
 def resolve_scenario(name: str) -> str:
@@ -139,71 +149,131 @@ def _action(
     )
 
 
-def _confirmed_leak_actions(decision_t: float, cfg: dict[str, Any]) -> list[ActionModel]:
-    clock = ScenarioClock(decision_t)
-    nvml = SimulatedNvml(get(cfg, "nvml.fake_min_limit_w"))
-    plc = SimulatedPlc(get(cfg, "plc.valve_travel_ms"))
-    checkpoint = SimulatedCheckpoint(
-        clock,
-        settle_s=get(cfg, "orchestrator.checkpoint_budget_ms") / 1000.0,
-        step=4200,
-    )
-    orchestrator = ConfirmedLeakOrchestrator(
-        clock=clock,
-        nvml=nvml,
-        plc=plc,
-        checkpoint=checkpoint,
-        clamp_latency_ms=get(cfg, "orchestrator.clamp_latency_ms"),
-    )
-    fsm = orchestrator.run()
-
-    if fsm.state is not IncidentState.RESOLVED_PENDING_REPAIR:
-        raise PipelineError(f"safe sequence ended in {fsm.state.value}, not a resolved incident")
+def _steps_to_actions(steps: list[SequenceStep]) -> list[ActionModel]:
+    """The orchestrator's executed steps are the only source of action records."""
 
     return [
-        _action(
-            1,
-            fsm.timestamp("clamp_verified"),
-            "NVML",
-            "CLAMP",
-            "READBACK_VERIFIED",
-            f"{nvml.clamp_w:.0f} W (simulated)",
-        ),
-        _action(
-            2,
-            fsm.timestamp("valve_closed"),
-            "PLC",
-            "VALVE_CLOSE",
-            "LIMIT_SWITCH_CLOSED",
-            f"travel {plc.travel_ms:.0f} ms (simulated)",
-        ),
-        _action(
-            3, fsm.timestamp("checkpoint_settled"), "STORAGE", "CHECKPOINT_VERIFY", "COMMITTED"
-        ),
-        _action(4, fsm.timestamp("power_off"), "BMC", "FORCE_OFF", "ACCEPTED"),
-        _action(5, fsm.timestamp("requeued"), "SLURM", "SCHEDULER_DRAIN", "DRAINED"),
-        _action(6, fsm.timestamp("requeued"), "SLURM", "REQUEUE", "REQUEUED"),
+        ActionModel(
+            seq=index,
+            t_s=round(float(step.ts), 3),
+            actor=step.actor,
+            command=step.command,
+            status=step.status,
+            detail=step.detail,
+        )
+        for index, step in enumerate(steps, 1)
     ]
 
 
-def _actions_for(decision: Decision, t_s: float, cfg: dict[str, Any]) -> list[ActionModel]:
+def _run_memory_sequence(
+    decision_t: float, cfg: dict[str, Any]
+) -> tuple[list[ActionModel], IncidentState]:
+    """No sockets: the same FSM with in-memory ports (unit tests, offline CI)."""
+
+    clock = ScenarioClock(decision_t)
+    orchestrator = ConfirmedLeakOrchestrator(
+        clock=clock,
+        nvml=SimulatedNvml(get(cfg, "nvml.fake_min_limit_w")),
+        plc=SimulatedPlc(get(cfg, "plc.valve_travel_ms")),
+        checkpoint=SimulatedCheckpoint(
+            clock,
+            settle_s=get(cfg, "orchestrator.checkpoint_budget_ms") / 1000.0,
+            step=int(get(cfg, "orchestrator.checkpoint_step")),
+            reason="in-memory checkpoint (SIMULATED)",
+        ),
+        bmc=SimulatedBmc(),
+        scheduler=SimulatedScheduler(cfg["scheduler"]),
+        clamp_latency_ms=get(cfg, "orchestrator.clamp_latency_ms"),
+    )
+    fsm = orchestrator.run()
+    return _steps_to_actions(orchestrator.steps), fsm.state
+
+
+def _run_live_sequence(
+    decision_t: float,
+    cfg: dict[str, Any],
+    endpoints: SimEndpoints,
+    checkpoint_dir: str | Path | None,
+) -> tuple[list[ActionModel], IncidentState]:
+    """Real Modbus-TCP and Redfish clients; the blocking run happens in a thread."""
+
+    clock = ScenarioClock(decision_t)
+    directory = (
+        Path(checkpoint_dir)
+        if checkpoint_dir is not None
+        else ROOT / str(get(cfg, "orchestrator.checkpoint_dir"))
+    )
+    orchestrator = ConfirmedLeakOrchestrator(
+        clock=clock,
+        nvml=build_nvml(cfg["nvml"], tolerance_w=float(get(cfg, "orchestrator.clamp_tolerance_w"))),
+        plc=PlcClient(cfg["plc"], host=endpoints.plc_host, port=endpoints.plc_port),
+        checkpoint=CheckpointAdapter(
+            clock,
+            directory,
+            step=int(get(cfg, "orchestrator.checkpoint_step")),
+            scheduler_cfg=cfg["scheduler"],
+        ),
+        bmc=RedfishClient(cfg["bmc"], base_url=endpoints.bmc_url),
+        scheduler=SchedulerAdapter(cfg["scheduler"]),
+        clamp_latency_ms=float(get(cfg, "orchestrator.clamp_latency_ms")),
+    )
+    fsm = orchestrator.run()
+    return _steps_to_actions(orchestrator.steps), fsm.state
+
+
+async def _confirmed_leak_actions(
+    decision_t: float, cfg: dict[str, Any], checkpoint_dir: str | Path | None
+) -> tuple[list[ActionModel], IncidentState]:
+    mode = str(cfg["orchestrator"]["protocol_mode"]).lower()
+    if mode == "memory":
+        return _run_memory_sequence(decision_t, cfg)
+    if mode == "loopback":
+        # The PLC ticker and the BMC server live on this event loop. The blocking
+        # clients must run in a worker thread or the simulation would deadlock.
+        async with loopback_simulators(cfg) as endpoints:
+            return await asyncio.to_thread(
+                _run_live_sequence, decision_t, cfg, endpoints, checkpoint_dir
+            )
+    if mode == "external":
+        return await asyncio.to_thread(
+            _run_live_sequence,
+            decision_t,
+            cfg,
+            SimEndpoints.from_config(cfg),
+            checkpoint_dir,
+        )
+    raise PipelineError(
+        f"unknown orchestrator.protocol_mode {mode!r} (expected memory, loopback, or external)"
+    )
+
+
+async def _actions_for(
+    decision: Decision, t_s: float, cfg: dict[str, Any], checkpoint_dir: str | Path | None
+) -> tuple[list[ActionModel], IncidentState | None]:
     if decision.label is SystemLabel.CONFIRMED_LEAK:
-        return _confirmed_leak_actions(t_s, cfg)
+        return await _confirmed_leak_actions(t_s, cfg, checkpoint_dir)
 
     if decision.label is SystemLabel.EMERGENCY_TRIP:
-        return [
-            _action(1, t_s, "PLC", "VALVE_CLOSE", "COMMANDED", "spring-return close, no wait"),
-            _action(2, t_s, "BMC", "FORCE_OFF", "COMMANDED", "checkpoint wait aborted"),
-            _action(3, t_s, "SLURM", "SCHEDULER_DRAIN", "COMMANDED", ""),
-        ]
+        return (
+            [
+                _action(1, t_s, "PLC", "VALVE_CLOSE", "COMMANDED", "spring-return close, no wait"),
+                _action(2, t_s, "BMC", "FORCE_OFF", "COMMANDED", "checkpoint wait aborted"),
+                _action(3, t_s, "SLURM", "SCHEDULER_DRAIN", "COMMANDED", ""),
+            ],
+            None,
+        )
 
     if decision.label is SystemLabel.HIDDEN_HYDRAULIC_EVENT:
-        return [
-            _action(1, t_s, "CONSOLE", "ALERT", "RAISED", "no visual evidence"),
-            _action(2, t_s, "SLURM", "SCHEDULER_DRAIN", "DRAINED", "soft cordon; no valve"),
-        ]
+        drained = SimulatedScheduler(cfg["scheduler"]).drain()
+        return (
+            [
+                _action(1, t_s, "CONSOLE", "ALERT", "RAISED", "no visual evidence"),
+                _action(2, t_s, "SLURM", "SCHEDULER_DRAIN", drained, "soft cordon; no valve"),
+            ],
+            None,
+        )
 
-    return []
+    return [], None
 
 
 def _run_index(name: str, cfg: dict[str, Any]) -> int:
@@ -235,6 +305,8 @@ async def run_scenario(
     max_seconds: float | None = None,
     sam_mode: str | None = None,
     sam_cache_dir: str | Path | None = None,
+    protocol_mode: str | None = None,
+    checkpoint_dir: str | Path | None = None,
 ) -> RunResult:
     scenario = load_scenario(name)
     clip = ROOT / scenario["clip"]
@@ -248,6 +320,7 @@ async def run_scenario(
     )
 
     mode = str(sam_mode or cfg["sam"].get("mode", "off"))
+    protocol = str(protocol_mode or cfg["orchestrator"]["protocol_mode"]).lower()
     sampler = CandidateManager(
         cfg["perception"],
         topology,
@@ -350,7 +423,7 @@ async def run_scenario(
                 next_tick_t = frame.t_s + 1.0 / hz
 
                 if decision.label in INCIDENT_LABELS:
-                    return _finish(
+                    return await _finish(
                         name=name,
                         scenario=scenario,
                         cfg=cfg,
@@ -366,6 +439,8 @@ async def run_scenario(
                         out_dir=out_dir,
                         tick_rate_hz=policy.hz,
                         rate_changes=policy.changes,
+                        protocol_mode=protocol,
+                        checkpoint_dir=checkpoint_dir,
                     )
         finally:
             if worker is not None:
@@ -381,10 +456,12 @@ async def run_scenario(
         tick_rate_hz=policy.hz,
         rate_changes=policy.changes,
         sam=(SamSummary.from_stats(mode, worker.stats) if worker is not None else None),
+        protocol_mode=protocol,
+        sequence_state=None,
     )
 
 
-def _finish(
+async def _finish(
     *,
     name: str,
     scenario: dict[str, Any],
@@ -401,12 +478,14 @@ def _finish(
     out_dir: str | Path | None,
     tick_rate_hz: float,
     rate_changes: int,
+    protocol_mode: str,
+    checkpoint_dir: str | Path | None,
 ) -> RunResult:
     fixture_source = scenario.get("provenance", "synthetic")
     if fixture_source not in ("synthetic", "capture"):
         raise PipelineError(f"scenario provenance must be synthetic or capture: {fixture_source}")
 
-    actions = _actions_for(decision, sample.t_s, cfg)
+    actions, sequence_state = await _actions_for(decision, sample.t_s, cfg, checkpoint_dir)
     incident_time = _incident_time(cfg, sample.t_s)
 
     evidence_model = EvidenceModel(
@@ -452,4 +531,6 @@ def _finish(
         tick_rate_hz=tick_rate_hz,
         rate_changes=rate_changes,
         sam=SamSummary.from_stats(sam_mode, sam_stats) if sam_stats is not None else None,
+        protocol_mode=protocol_mode,
+        sequence_state=sequence_state,
     )

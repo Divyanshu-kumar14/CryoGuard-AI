@@ -1,0 +1,105 @@
+"""NVML power-clamp adapters (P6-T03, D-07).
+
+The clamp target is never a literal: the real backend queries the device's
+minimum power limit and reads the value back. If NVML is missing, the device is
+unknown, or the readback does not land within tolerance, ``ClampResult.ok`` is
+false and the FSM hard-trips. It never pretends a clamp succeeded.
+"""
+
+from __future__ import annotations
+
+from importlib import import_module
+from importlib.util import find_spec
+from typing import Any
+
+from cryoguard.orchestrator.incident_fsm import ClampResult
+
+
+class NvmlError(ValueError):
+    """An unusable NVML configuration."""
+
+
+class FakeNvml:
+    """SIMULATED backend. The floor comes from config, not from a hard-coded watt."""
+
+    def __init__(self, min_limit_w: float, *, fail: bool = False) -> None:
+        if min_limit_w <= 0:
+            raise NvmlError(f"min_limit_w must be positive: {min_limit_w}")
+        self.min_limit_w = float(min_limit_w)
+        self.fail = fail
+        self.calls = 0
+
+    def clamp(self) -> ClampResult:
+        self.calls += 1
+        if self.fail:
+            return ClampResult(ok=False, applied_w=0.0, detail="injected readback failure")
+        return ClampResult(
+            ok=True,
+            applied_w=self.min_limit_w,
+            detail=f"fake NVML min_limit={self.min_limit_w:.0f} W",
+        )
+
+
+class RealNvml:
+    """NVML backend. Optional dependency: ``pynvml`` is imported lazily."""
+
+    def __init__(self, device_index: int = 0, *, tolerance_w: float = 5.0) -> None:
+        if device_index < 0:
+            raise NvmlError(f"device_index must be non-negative: {device_index}")
+        if tolerance_w <= 0:
+            raise NvmlError(f"tolerance_w must be positive: {tolerance_w}")
+        self.device_index = device_index
+        self.tolerance_w = float(tolerance_w)
+
+    @staticmethod
+    def available() -> bool:
+        return find_spec("pynvml") is not None
+
+    def clamp(self) -> ClampResult:
+        try:
+            pynvml: Any = import_module("pynvml")
+        except ImportError:
+            return ClampResult(ok=False, applied_w=0.0, detail="pynvml is not installed")
+
+        initialized = False
+        try:
+            pynvml.nvmlInit()
+            initialized = True
+            handle = pynvml.nvmlDeviceGetHandleByIndex(self.device_index)
+            minimum_mw, _maximum_mw = pynvml.nvmlDeviceGetPowerManagementLimitConstraints(handle)
+            if int(minimum_mw) <= 0:
+                return ClampResult(
+                    ok=False, applied_w=0.0, detail=f"device reported min_limit={minimum_mw} mW"
+                )
+            pynvml.nvmlDeviceSetPowerManagementLimit(handle, int(minimum_mw))
+            readback_mw = int(pynvml.nvmlDeviceGetPowerManagementLimit(handle))
+        except Exception as exc:  # NVML raises its own exception type
+            return ClampResult(
+                ok=False,
+                applied_w=0.0,
+                detail=f"NVML error: {type(exc).__name__}: {exc}",
+            )
+        finally:
+            if initialized:
+                try:
+                    pynvml.nvmlShutdown()
+                except Exception:
+                    pass
+
+        applied_w = readback_mw / 1000.0
+        target_w = minimum_mw / 1000.0
+        ok = abs(readback_mw - int(minimum_mw)) <= self.tolerance_w * 1000.0
+        return ClampResult(
+            ok=ok,
+            applied_w=applied_w,
+            detail=f"min_limit={target_w:.0f} W; readback={applied_w:.0f} W",
+        )
+
+
+def build_nvml(section: dict[str, Any], *, tolerance_w: float = 5.0) -> FakeNvml | RealNvml:
+    backend = str(section.get("backend", "fake")).lower()
+    if backend == "fake":
+        return FakeNvml(float(section["fake_min_limit_w"]))
+    if backend == "real":
+        return RealNvml(tolerance_w=tolerance_w)
+    raise NvmlError(f"unknown nvml.backend {backend!r} (expected fake or real)")
