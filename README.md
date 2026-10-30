@@ -51,11 +51,17 @@ scenario, or `make serve SCENARIO=` to start idle.
 ## Dashboard
 
 The console is vanilla HTML/CSS/ES modules with no build step, no npm, and no
-external asset request. It is an observer: `EventBus.publish` never raises, a
-dead browser tab cannot stop a valve close, and the only mutating endpoint is
-`POST /api/run`.
+runtime asset request (both typefaces are bundled under `ui/fonts/`). It is an
+observer: `EventBus.publish` never raises, a dead browser tab cannot stop a valve
+close, and the only mutating endpoint is `POST /api/run`.
 
-- `GET /api/state` — topology, configured thresholds, manifest, run record
+It draws the chassis plane, the fusion inputs and the interlock sequence from the
+event stream, and it can **rewind the incident**: `/api/state` carries the run's
+event history, so dragging the P(leak) trace folds that history at a cursor and
+re-renders the canvas, the decision, the telemetry and the actuation ladder at
+that tick. Nothing is replayed from a recording of the screen.
+
+- `GET /api/state` — topology, thresholds, manifest, run record, event history
 - `GET /api/manifest` — every clip with its `source`
 - `GET /api/incidents/{id}` — sealed incident JSON, read-only
 - `WS /ws` — history replay, then live `FRAME_TICK`, `EVIDENCE_UPDATE`,

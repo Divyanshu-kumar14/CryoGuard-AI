@@ -7,7 +7,8 @@ pipeline does not await a subscriber and ``EventBus.publish`` never raises.
 
 Endpoints
 ---------
-``GET  /api/state``              topology, thresholds, manifest, run, latest event fold
+``GET  /api/state``              topology, thresholds, manifest, run, fold and the
+                                 current run's event history (for the rewind scrubber)
 ``GET  /api/manifest``           fixture manifest (every clip carries its source)
 ``GET  /api/incidents/{id}``     sealed incident JSON, read-only
 ``POST /api/run``                start one scenario; 409 while another is running
@@ -244,7 +245,8 @@ class Dashboard:
             ),
             "pxPerMm": float(get(self.cfg, "camera.px_per_mm")),
         }
-        latest = _fold(self.bus.snapshot())
+        events = self.bus.snapshot()
+        latest = _fold(events)
         run = self.run.as_dict()
 
         # The event stream is the source of truth for a terminal run. The
@@ -285,6 +287,7 @@ class Dashboard:
             "scenarios": self.scenarios(),
             "run": run,
             "latest": latest,
+            "history": [event.to_json() for event in events],
             "notes": [
                 "All clips are synthetic unless a manifest row says source: capture.",
                 "PLC, BMC, NVML, Slurm and telemetry are simulators in the default demo.",

@@ -67,6 +67,26 @@ def test_the_ui_makes_no_external_request_and_has_no_build_step() -> None:
         ".js",
         ".md",
     }
+    # The two faces are bundled, not fetched at runtime: a woff2 next to the
+    # stylesheet is still an offline asset, and the browser never leaves the host.
+    fonts = {path.suffix for path in (UI / "fonts").iterdir() if path.is_file()}
+    assert fonts == {".woff2", ".txt"}
+    assert CSS.count('url("/ui/fonts/') >= 2
+    assert (UI / "fonts" / "OFL.txt").is_file()
+
+
+def test_the_trace_is_a_keyboard_operable_rewind_control() -> None:
+    """The scrubber is the console's one review tool; it must not be mouse-only."""
+
+    assert 'role="slider"' in HTML
+    assert 'aria-label="Rewind the incident: P(leak) over elapsed time"' in HTML
+    assert 'id="review-flag"' in HTML
+    assert 'id="review-exit"' in HTML
+    for key in ("ArrowLeft", "ArrowRight", "Home", "End", "Escape"):
+        assert key in JS
+    # Rewinding replays the event history rather than a recording of the screen.
+    assert "history: [event.to_json()" not in JS
+    assert "data.history || []" in JS
 
 
 def test_the_canvas_is_accessible_and_motion_is_bounded() -> None:

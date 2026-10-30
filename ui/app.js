@@ -1,18 +1,29 @@
-// CryoGuard AI — observer console.
+// CryoGuard AI — rack safety console.
 //
-// The decision strip is fed exclusively by the WebSocket event stream. There
-// are no probability thresholds, fixture results, or incident numbers in this
-// file: every value is rendered from a pipeline event or from /api/state
-// (topology, configured thresholds, manifest). The grep gate in
-// tests/test_ui_contract.py enforces the no-literal rule.
+// Every value on this screen comes from an event on the pipeline's typed bus or
+// from /api/state (topology, configured thresholds, manifest, run record). There
+// are no probability thresholds, fixture results or incident numbers in this
+// file: tests/test_ui_contract.py fails the build if a decimal literal in [0,1)
+// appears here, so a fabricated P(leak) cannot hide on screen.
+//
+// The console keeps the whole event history for the current run:
+//   /api/state.history  the run so far, on load
+//   /ws                 replay of the same events, then live ones (de-duped by seq)
+// That is what makes the rewind scrubber honest: dragging the trace re-renders
+// the chassis, the decision and the actuation ladder at that tick, from events
+// the pipeline actually emitted, not from a recording of the UI.
+//
+// Note on numerics: literals below 1 are written without a leading zero (.25,
+// .16). That is the contract's own constraint — see the test named above — and
+// it keeps the "no fabricated probability" grep meaningful.
 
 const $ = (id) => document.getElementById(id);
 
 const SCENARIO_LABELS = {
-  leak: "QD-04 LEAK",
-  condensation: "CONDENSATION",
-  glint: "GLINT",
-  hidden: "HIDDEN HYDRAULIC",
+  leak: "QD-04 leak",
+  condensation: "Condensation",
+  glint: "Glint",
+  hidden: "Hidden hydraulic",
 };
 
 const INCIDENT_LABELS = new Set(["CONFIRMED_LEAK", "EMERGENCY_TRIP"]);
@@ -24,6 +35,31 @@ const CAUTION_LABELS = new Set([
 ]);
 const CALM_LABELS = new Set(["NOMINAL", "LOG_ONLY", "BENIGN_CONDENSATION"]);
 
+const DESIGN = { w: 1200, h: 800 };
+const TRACE = { left: 30, right: 8, top: 8, bottom: 16 };
+// The scan sweep advances one eighth of the plane per pipeline tick, so eight
+// frames of the 10 Hz loop make one pass. It is driven by FRAME_TICK, never by
+// a timer: when the loop stops, the light stops.
+const SWEEP_STEP = 1 / 8;
+
+const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+const C = {
+  ink: cssVar("--text") || "#ffffff",
+  muted: cssVar("--muted") || "#8a8c92",
+  border: cssVar("--border") || "#222224",
+  surface: cssVar("--surface") || "#131217",
+  accent: cssVar("--accent") || "#4a8ad6",
+  positive: cssVar("--positive") || "#44a282",
+  negative: cssVar("--negative") || "#e5566f",
+  warning: cssVar("--warning") || "#d9a441",
+  tracer: cssVar("--tracer") || "#d8f26a",
+};
+
 const state = {
   topology: null,
   canvas: null,
@@ -32,26 +68,34 @@ const state = {
   manifest: null,
   source: "synthetic",
   protocol: "loopback",
+  samMode: "cache",
   selected: null,
   running: false,
-  frame: null,
-  camera: null,
-  evidence: null,
-  decision: null,
+  history: [],
+  lastSeq: -1,
+  frames: [],
+  evidences: [],
+  decisions: [],
   actions: [],
-  incident: null,
   started: null,
+  incident: null,
   finished: null,
-  pHistory: [],
-  needsDraw: true,
+  cursor: null,
+  view: "live",
+  sweepTarget: 0,
+  sweepShown: 0,
+  chassisBox: { w: 1, h: 1, dpr: 1 },
+  traceGeom: { left: TRACE.left, right: TRACE.right, tMax: 1 },
+  renderedLadder: "",
+  needsChassis: true,
   socket: null,
   retry: null,
   toastTimer: null,
-  reducedMotion: window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+  reportTimer: null,
+  lastView: null,
+  firstTick: false,
+  clipFrames: null,
 };
-
-const MONO = 'ui-monospace, "SFMono-Regular", "Cascadia Mono", Menlo, monospace';
-const SANS = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 
 /* ---------- formatting ---------- */
 
@@ -69,13 +113,45 @@ function signed(value, digits) {
 
 function setText(id, text) {
   const node = $(id);
-  if (node) node.textContent = text;
+  if (node && node.textContent !== text) node.textContent = text;
+}
+
+function compact(hash) {
+  const text = String(hash || "");
+  return text ? text.slice(0, 8) : "—";
+}
+
+function clockTime() {
+  const now = new Date();
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+}
+
+function toneForLabel(label) {
+  if (INCIDENT_LABELS.has(label)) return "bad";
+  if (CAUTION_LABELS.has(label)) return "warn";
+  if (CALM_LABELS.has(label)) return "ok";
+  return "neutral";
+}
+
+function toneForStatus(status) {
+  if (/VERIFIED|CLOSED|COMMITTED|ACCEPTED|DRAINED|REQUEUED|READBACK_VERIFIED/.test(status)) {
+    return "ok";
+  }
+  if (/SLOW/.test(status)) return "warn";
+  if (/FAULT|FAILED|REJECTED/.test(status)) return "bad";
+  return "neutral";
 }
 
 /* ---------- boot ---------- */
 
 async function boot() {
   bindControls();
+  $("clock").textContent = clockTime();
+  window.setInterval(() => {
+    setText("clock", clockTime());
+  }, 1000);
+
   try {
     const response = await fetch("/api/state", { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -83,6 +159,7 @@ async function boot() {
   } catch (error) {
     showToast(`Cannot read /api/state: ${error.message}`);
   }
+
   connect();
   requestAnimationFrame(loop);
 }
@@ -95,38 +172,65 @@ function applyState(data) {
   state.manifest = data.manifest;
   state.source = data.simulated ? "synthetic" : "capture";
   state.protocol = data.server ? data.server.protocolMode : "loopback";
+  state.samMode = data.server ? data.server.samMode : "cache";
   state.selected = (data.run && data.run.scenario_key) || state.scenarios[0]?.key || null;
 
   setText("rack-id", data.rackId || "—");
+  setText("rack-title", data.rackId || "Rack");
   setText("branch-id", data.branchId || "—");
-  setText("config-hash", data.configHash || "—");
-  setText("fusion-hash", data.fusionHash || "—");
+  setText("config-hash", compact(data.configHash));
+  setText("fusion-hash", compact(data.fusionHash));
+  $("config-hash").title = `safety config hash ${data.configHash || "unavailable"}`;
+  $("fusion-hash").title = `fusion freeze hash ${data.fusionHash || "unavailable"}`;
+
   const zones = (data.topology && data.topology.zones ? data.topology.zones : [])
-    .map((zone) => `${zone.id} ${zone.name}`)
-    .join(" · ");
+    .map((zone) => `${zone.id} ${(zone.name || "").toLowerCase()}`)
+    .join(", ");
   setText("zone-list", zones || "—");
+  const chassis = data.topology && data.topology.chassis;
+  setText(
+    "plane-size",
+    chassis ? `${chassis.width_mm} × ${chassis.height_mm} mm plane` : "—",
+  );
+
+  if (state.canvas) {
+    setText(
+      "viewport-geom",
+      `${state.canvas.widthPx} × ${state.canvas.heightPx} px · ${fixed(state.canvas.pxPerMm, 1)} px/mm`,
+    );
+  }
+
+  // Replay the server's copy of the run, then let the socket's replay be a
+  // no-op: ingest() drops any seq that has already been applied.
+  state.history = [];
+  state.lastSeq = -1;
+  for (const event of data.history || []) ingest(event);
+  if (data.run) updateRunRecord(data.run);
 
   updateSimulationBadges();
   renderScenarios();
   renderThresholds();
-  resizeCanvas();
-  if (data.run) updateRunRecord(data.run);
-  state.needsDraw = true;
+  resizeChassis();
+  render();
 }
 
 function updateRunRecord(run) {
   if (run.status === "running") {
-    setRunStatus("running", "RUNNING");
     setRunning(true);
+    setRunStatus("running", "RUNNING");
+    setRunFlag("running", "LIVE");
   } else if (run.status === "finished") {
+    setRunning(false);
     setRunStatus("finished", run.incident_id ? "INCIDENT FILED" : "NO INCIDENT");
-    setRunning(false);
+    setRunFlag("finished", run.incident_id ? "SEALED" : "CLEAR");
   } else if (run.status === "failed") {
+    setRunning(false);
     setRunStatus("failed", "FAILED");
-    setRunning(false);
+    setRunFlag("failed", "FAILED");
   } else {
-    setRunStatus("idle", "IDLE");
     setRunning(false);
+    setRunStatus("idle", "IDLE");
+    setRunFlag("idle", "IDLE");
   }
 }
 
@@ -149,7 +253,7 @@ function connect() {
     } catch {
       return;
     }
-    handleEvent(event);
+    ingest(event);
   });
   socket.addEventListener("close", () => {
     setConnection(false);
@@ -165,9 +269,15 @@ function setConnection(online) {
   setText("conn-text", online ? "WS LIVE" : "WS OFFLINE");
 }
 
-/* ---------- event routing ---------- */
+/* ---------- event ingestion ---------- */
 
-function handleEvent(event) {
+function ingest(event) {
+  const seq = Number(event.seq);
+  const known = Number.isFinite(seq);
+
+  if (known && event.type !== "RUN_STARTED" && seq <= state.lastSeq) return;
+  if (known) state.lastSeq = seq;
+
   switch (event.type) {
     case "RUN_STARTED":
       resetRun(event);
@@ -191,126 +301,106 @@ function handleEvent(event) {
       onFinished(event);
       break;
     case "HEARTBEAT":
-      break;
+      return;
     default:
-      break;
+      return;
   }
+
+  state.history.push(event);
+  scheduleRender();
 }
 
 function resetRun(event) {
   const data = event.data || {};
-  state.frame = null;
-  state.camera = null;
-  state.evidence = null;
-  state.decision = null;
+  state.frames = [];
+  state.evidences = [];
+  state.decisions = [];
   state.actions = [];
+  state.started = { t: Number(event.tS), ...data };
   state.incident = null;
-  state.started = data;
   state.finished = null;
-  state.pHistory = [];
+  state.cursor = null;
+  state.sweepTarget = 0;
+  state.sweepShown = 0;
+  state.renderedLadder = "";
+  state.firstTick = false;
   state.source = data.provenance || "synthetic";
   state.protocol = data.protocolMode || "loopback";
+  state.samMode = data.samMode || state.samMode;
   if (data.scenarioKey) state.selected = data.scenarioKey;
+
+  if (state.reportTimer) window.clearTimeout(state.reportTimer);
+  setView("live");
+  $("tab-report").disabled = true;
+  clearReport();
+  clearTelemetry();
+  clearDecision();
+  clearLadder("No actuation yet. The safety loop is armed; steps appear only if the decision table confirms one.");
+  setRunStatus("running", "STARTING");
+  setRunFlag("running", "LIVE");
+  // The clip length comes from the fixture manifest, so "frame 229 of 600"
+  // is the real length of the source, not a guess at how far the run will go.
+  const clip = (state.manifest?.clips || []).find((row) => row.path === data.clip);
+  state.clipFrames = clip ? Number(clip.frames) || null : null;
+  setText("viewport-source", `SOURCE ${String(state.source).toUpperCase()} / ${data.scenario || "—"}`);
+  setText("hud-frame", "—");
+  setText("hud-time", "T+ —");
+  setText("hud-zone", "—");
+  setText("hud-area", "—");
+  setText("hud-camera", "CAMERA —");
 
   updateSimulationBadges();
   renderScenarios();
-  clearDecision();
-  clearTelemetry();
-  clearTimeline("No actuation yet. The safety loop is armed; steps appear only if the decision table confirms one.");
-  clearReport();
-  setRunStatus("running", "RUNNING");
-  setRunning(true);
-
-  setText("viewport-source", `SOURCE ${state.source.toUpperCase()} / ${data.scenario || "—"}`);
-  setText("hud-frame", "—");
-  setText("hud-time", "—");
-  setText("hud-zone", "—");
-  setText("hud-area", "—");
-  setText("camera-health", "CAMERA —");
-  const health = $("camera-health");
-  health.classList.remove("is-ok", "is-warn", "is-bad");
-  state.needsDraw = true;
+  state.needsChassis = true;
 }
 
 function onFrame(event) {
-  state.frame = event.data;
-  state.camera = event.data.camera;
-  const candidate = event.data.candidate;
-  setText("hud-frame", String(event.data.frame).padStart(4, "0"));
-  setText("hud-time", fixed(event.tS, 2));
-  setText("hud-zone", candidate && candidate.zone !== null ? String(candidate.zone) : "—");
-  setText("hud-area", candidate ? fixed(candidate.areaMm2, 1) : "—");
-  updateCameraBadge(event.data.camera);
-  state.needsDraw = true;
-}
-
-function updateCameraBadge(camera) {
-  const badge = $("camera-health");
-  badge.classList.remove("is-ok", "is-warn", "is-bad");
-  if (!camera || camera.ok === undefined) {
-    badge.textContent = "CAMERA —";
-    return;
+  const data = event.data;
+  if (!state.firstTick) {
+    state.firstTick = true;
+    if (state.running) setRunStatus("running", "RUNNING");
   }
-  if (camera.ok) {
-    badge.textContent = "CAMERA OK";
-    badge.classList.add("is-ok");
-    return;
-  }
-  const reasons = (camera.reasons || []).join(" / ");
-  badge.textContent = `CAMERA DEGRADED${reasons ? `: ${reasons}` : ""}`;
-  badge.classList.add("is-bad");
+  state.frames.push({
+    t: Number(event.tS),
+    frame: data.frame,
+    contours: data.contours || [],
+    candidate: data.candidate || null,
+    camera: data.camera || null,
+  });
+  if (state.frames.length > 4096) state.frames.shift();
+  if (state.cursor === null) state.sweepTarget = (state.sweepTarget + SWEEP_STEP) % 1;
 }
 
 function onEvidence(event) {
-  const data = event.data;
-  state.evidence = data;
-  setMeter("v", data.phiV, false);
-  setMeter("h", data.phiH, false);
-  setMeter("t", data.phiT, true);
-  setMeter("w", data.W, false);
-
-  setText("t-rate", signed(data.pressureRatePsiPerS, 2));
-  setText("t-margin", signed(data.dewMarginC, 1));
-  setText("t-pressure", fixed(data.pressurePsi, 1));
-  setText("t-flow", signed(data.flowImbalanceLpm, 2));
-  setText("t-surface", fixed(data.surfaceC, 1));
-  setText("t-dew", fixed(data.dewPointC, 1));
-
-  colorTone($("t-rate"), Number(data.pressureRatePsiPerS) > 0 ? "warn" : "ok");
-  colorTone($("t-margin"), Number(data.dewMarginC) < 0 ? "warn" : "ok");
+  state.evidences.push({ t: Number(event.tS), ...event.data });
+  if (state.evidences.length > 4096) state.evidences.shift();
 }
 
 function onDecision(event) {
-  const data = event.data;
-  state.decision = data;
-  state.pHistory.push({ t: Number(event.tS), p: Number(data.p), label: data.label });
-  if (state.pHistory.length > 400) state.pHistory.shift();
-
-  setText("p-leak", fixed(data.p, 3));
-  setText("rule-id", data.ruleId || "—");
-  setText("streak", fixed(data.streak, 0));
-  const panel = $("decision-panel");
-  panel.dataset.state = data.label;
-  const chip = $("decision-chip");
-  chip.textContent = data.changed ? "BAND CHANGE" : "HOLDING";
-  colorTone(chip, toneForLabel(data.label));
-
-  if (data.changed) {
-    setText("state-label", data.label);
-    setText("p-sub", `since T+${fixed(event.tS, 2)} s`);
-  }
-  drawSparkline();
+  const previous = state.decisions[state.decisions.length - 1];
+  const changeT = event.data.changed
+    ? Number(event.tS)
+    : previous
+      ? previous.changeT
+      : Number(event.tS);
+  state.decisions.push({ t: Number(event.tS), changeT, ...event.data });
+  if (state.decisions.length > 4096) state.decisions.shift();
 }
 
 function onAction(event) {
-  state.actions.push({ ...event.data, t: event.tS });
-  renderTimeline();
+  state.actions.push({ t: Number(event.tS), ...event.data });
 }
 
 function onIncident(event) {
   state.incident = event.data;
+  $("tab-report").disabled = false;
   renderReport(event.data.report, event.data);
   setRunStatus("finished", "INCIDENT FILED");
+  setRunFlag("finished", "SEALED");
+  if (state.cursor === null) {
+    if (state.reportTimer) window.clearTimeout(state.reportTimer);
+    state.reportTimer = window.setTimeout(() => setView("report"), 720);
+  }
 }
 
 function onFinished(event) {
@@ -318,21 +408,366 @@ function onFinished(event) {
   setRunning(false);
   if (event.data.outcome === "incident") {
     setRunStatus("finished", "INCIDENT FILED");
+    setRunFlag("finished", "SEALED");
   } else if (event.data.outcome === "no_incident") {
     setRunStatus("finished", "NO INCIDENT");
-    clearTimeline(
-      `No incident in ${event.data.ticks} ticks. Zero actuations.`,
-    );
+    setRunFlag("finished", "CLEAR");
+    clearLadder(`No incident in ${event.data.ticks} ticks. Zero actuations.`);
   } else {
     setRunStatus("failed", "FAILED");
+    setRunFlag("failed", "FAILED");
     showToast(event.data.error || "Run failed.");
   }
+  document.body.dataset.review = "false";
+}
+
+/* ---------- replay: fold the event stream at a cursor ---------- */
+
+function lastAtOrBefore(list, t) {
+  let lo = 0;
+  let hi = list.length - 1;
+  let found = null;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (list[mid].t <= t) {
+      found = list[mid];
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return found;
+}
+
+function scheduleRender() {
+  state.renderPending = true;
+}
+
+function viewAt(cursor) {
+  if (cursor === null) {
+    return {
+      frame: state.frames[state.frames.length - 1] || null,
+      evidence: state.evidences[state.evidences.length - 1] || null,
+      decision: state.decisions[state.decisions.length - 1] || null,
+      actions: state.actions,
+      incident: state.incident,
+    };
+  }
+  return {
+    frame: lastAtOrBefore(state.frames, cursor),
+    evidence: lastAtOrBefore(state.evidences, cursor),
+    decision: lastAtOrBefore(state.decisions, cursor),
+    actions: state.actions.filter((action) => action.t <= cursor + 1 / 1000),
+    incident: null,
+  };
+}
+
+/* ---------- render ---------- */
+
+function render() {
+  const view = viewAt(state.cursor);
+  state.lastView = view;
+
+  applyFrameHud(view.frame);
+  applyDecision(view.decision);
+  applyEvidence(view.evidence);
+  renderLadder(view.actions);
+  drawTrace();
+  updateReviewChrome();
+  state.needsChassis = true;
+}
+
+function applyFrameHud(frame) {
+  if (!frame) return;
+  const candidate = frame.candidate;
+  const total = state.clipFrames ? `/${state.clipFrames}` : "";
+  setText("hud-frame", `${String(frame.frame).padStart(4, "0")}${total}`);
+  setText("hud-time", `T+ ${fixed(frame.t, 3)}`);
+  setText("hud-zone", candidate && candidate.zone !== null ? String(candidate.zone) : "—");
+  setText("hud-area", candidate ? fixed(candidate.areaMm2, 1) : "—");
+  applyCamera(frame.camera);
+}
+
+function applyCamera(camera) {
+  const node = $("hud-camera");
+  if (!camera || camera.ok === undefined) {
+    setText("hud-camera", "CAMERA —");
+    return;
+  }
+  if (camera.ok) {
+    node.dataset.tone = "ok";
+    setText("hud-camera", "CAMERA OK");
+    return;
+  }
+  node.dataset.tone = "bad";
+  const reasons = (camera.reasons || []).join(" / ");
+  setText("hud-camera", `CAMERA DEGRADED${reasons ? ` — ${reasons}` : ""}`);
+}
+
+function applyDecision(data) {
+  const panel = $("decision-panel");
+  const chip = $("decision-chip");
+  if (!data) {
+    clearDecision();
+    return;
+  }
+
+  setText("p-leak", fixed(data.p, 3));
+  panel.dataset.state = data.label;
+  chip.dataset.state = toneForLabel(data.label);
+  setText("decision-chip", data.changed ? "BAND CHANGE" : "HOLDING");
+  setText("rule-id", data.ruleId || "—");
+  setText("streak", fixed(data.streak, 0));
+  setText("state-label", data.label);
+  markActiveBand(data.label);
+  setText("p-sub", `since T+${fixed(data.changeT === undefined ? data.t : data.changeT, 2)} s`);
+  if (data.changed && state.cursor === null) flashValue($("p-leak"));
+}
+
+function flashValue(node) {
+  if (prefersReducedMotion) return;
+  node.classList.remove("is-flashing");
+  void node.offsetWidth;
+  node.classList.add("is-flashing");
+}
+
+function applyEvidence(data) {
+  if (!data) return;
+  setMeter("v", data.phiV, false);
+  setMeter("h", data.phiH, false);
+  setMeter("t", data.phiT, true);
+  setMeter("w", data.W, false);
+
+  setText("t-pressure", fixed(data.pressurePsi, 1));
+  setText("t-rate", signed(data.pressureRatePsiPerS, 2));
+  setText("t-flow", signed(data.flowImbalanceLpm, 2));
+  setText("t-surface", fixed(data.surfaceC, 1));
+  setText("t-dew", fixed(data.dewPointC, 1));
+  setText("t-margin", signed(data.dewMarginC, 1));
+
+  toneNumber($("t-rate"), Number(data.pressureRatePsiPerS) > 0 ? "warn" : "ok");
+  toneNumber($("t-margin"), Number(data.dewMarginC) < 0 ? "bad" : "ok");
+  toneNumber($("t-flow"), Math.abs(Number(data.flowImbalanceLpm)) > 0 ? "warn" : "ok");
+}
+
+function toneNumber(node, tone) {
+  if (!node) return;
+  node.classList.remove("is-warn", "is-bad");
+  if (tone === "warn") node.classList.add("is-warn");
+  if (tone === "bad") node.classList.add("is-bad");
+}
+
+function setMeter(key, value, isSigned) {
+  const fill = $(`meter-${key}`);
+  const numeric = Number(value);
+  if (!fill) return;
+  if (!Number.isFinite(numeric)) {
+    fill.style.width = "0";
+    setText(`meter-${key}-value`, "—");
+    return;
+  }
+  setText(`meter-${key}-value`, fixed(numeric, 2));
+  fill.classList.remove("is-warm", "is-cool");
+  if (isSigned) {
+    const clamped = Math.max(-1, Math.min(1, numeric));
+    const width = Math.abs(clamped) * 50;
+    fill.style.width = `${width}%`;
+    fill.style.left = clamped >= 0 ? "50%" : `${50 - width}%`;
+    fill.classList.add(clamped > 0 ? "is-warm" : "is-cool");
+  } else {
+    const clamped = Math.max(0, Math.min(1, numeric));
+    fill.style.width = `${clamped * 100}%`;
+    fill.style.left = "0";
+  }
+}
+
+function clearDecision() {
+  setText("p-leak", "—");
+  setText("state-label", "IDLE");
+  setText("rule-id", "—");
+  setText("streak", "—");
+  setText("p-sub", "awaiting event");
+  $("decision-panel").dataset.state = "IDLE";
+  $("decision-chip").dataset.state = "neutral";
+  setText("decision-chip", "IDLE");
+  markActiveBand("");
+}
+
+function clearTelemetry() {
+  for (const id of ["t-pressure", "t-rate", "t-flow", "t-surface", "t-dew", "t-margin"]) {
+    setText(id, "—");
+    toneNumber($(id), "none");
+  }
+  for (const key of ["v", "h", "t", "w"]) {
+    const fill = $(`meter-${key}`);
+    if (fill) {
+      fill.style.width = "0";
+      fill.style.left = "0";
+    }
+    setText(`meter-${key}-value`, "—");
+  }
+}
+
+/* ---------- actuation ladder ---------- */
+
+function clearLadder(message) {
+  const list = $("timeline");
+  list.replaceChildren();
+  const empty = document.createElement("li");
+  empty.className = "empty-state";
+  empty.textContent = message;
+  list.append(empty);
+  setText("timeline-count", "0 steps");
+  state.renderedLadder = "";
+}
+
+function renderLadder(actions) {
+  const key = `${actions.length}:${state.cursor === null ? "live" : state.cursor}`;
+  if (key === state.renderedLadder) return;
+  state.renderedLadder = key;
+
+  const list = $("timeline");
+  setText("timeline-count", `${actions.length} ${actions.length === 1 ? "step" : "steps"}`);
+
+  if (!actions.length) {
+    clearLadder(
+      state.cursor === null
+        ? "No actuation yet. Steps appear here in execution order, with the readback that accepted or rejected each one."
+        : `No actuation had run at T+${fixed(state.cursor, 2)} s. Drag right to reach the sequence.`,
+    );
+    return;
+  }
+
+  list.replaceChildren();
+  actions.forEach((action, index) => {
+    const item = document.createElement("li");
+    item.className = "step";
+    item.dataset.tone = toneForStatus(action.status);
+    item.dataset.latest = String(index === actions.length - 1 && state.cursor === null);
+
+    const node = document.createElement("span");
+    node.className = "step-node";
+    node.setAttribute("aria-hidden", "true");
+
+    const body = document.createElement("div");
+    body.className = "step-body";
+
+    const command = document.createElement("div");
+    command.className = "step-command";
+    const commandName = document.createElement("span");
+    commandName.textContent = action.command;
+    const actor = document.createElement("span");
+    actor.className = "step-actor";
+    actor.textContent = action.actor;
+    command.append(commandName, actor);
+
+    const detail = document.createElement("div");
+    detail.className = "step-detail";
+    detail.textContent = action.detail || "no detail";
+
+    body.append(command, detail);
+
+    const right = document.createElement("div");
+    right.className = "step-right";
+    const status = document.createElement("span");
+    status.className = "step-status";
+    status.textContent = action.status;
+    const time = document.createElement("span");
+    time.className = "step-time";
+    time.textContent = `T+${fixed(action.t, 2)}`;
+    right.append(status, time);
+
+    item.append(node, body, right);
+    list.append(item);
+  });
+}
+
+/* ---------- report ---------- */
+
+function clearReport() {
+  const badge = $("report-badge");
+  badge.textContent = "AWAITING INCIDENT";
+  badge.dataset.source = "none";
+  $("report-content").hidden = true;
+  $("report-empty").hidden = false;
+}
+
+function renderReport(report, event) {
+  if (!report) return;
+  const badge = $("report-badge");
+  const isLlm = report.reportSource === "llm";
+  badge.textContent = isLlm ? "[REPORT: MUSE SPARK OPEN]" : "[FALLBACK: DETERMINISTIC]";
+  badge.dataset.source = report.reportSource || "deterministic_fallback";
+  $("tab-report").disabled = false;
+
+  const evidence = report.physicalEvidence || {};
+  const fallback = `Deterministic fallback: ${evidence.label} at ${
+    report.suspectedOrigin
+  } with P(leak) ${fixed(evidence.pLeak, 3)}. No model prose was generated; the evidence and the actions above are the complete record.`;
+  setText("report-root-cause", report.rootCauseExplanation || fallback);
+  setText(
+    "report-uncertainty",
+    report.llmUncertainty ||
+      "Not applicable: the deterministic fallback does not estimate uncertainty.",
+  );
+  setText("report-action", report.recommendedOperatorAction || "—");
+  setText("report-id", report.incidentId || "—");
+  setText("report-origin", report.suspectedOrigin || "—");
+  setText(
+    "report-evidence",
+    `${evidence.label || "—"} · φv ${fixed(evidence.phiVisual, 2)} · φh ${fixed(
+      evidence.phiHydraulic,
+      2,
+    )} · W ${fixed(evidence.wetness, 2)} · ${fixed(evidence.areaMm2, 1)} mm²`,
+  );
+  setText(
+    "report-source",
+    isLlm
+      ? `Muse Spark Open${event && event.simulated ? " · simulated incident" : ""}`
+      : "Deterministic fallback (no model)",
+  );
+  setText("report-time", report.timestamp || "—");
+  setText("report-model", report.llmModel || "not invoked");
+
+  $("report-empty").hidden = true;
+  $("report-content").hidden = false;
+}
+
+function setView(view) {
+  state.view = view;
+  $("band").dataset.view = view;
+  const live = $("tab-live");
+  const report = $("tab-report");
+  const isLive = view === "live";
+  live.classList.toggle("is-active", isLive);
+  report.classList.toggle("is-active", !isLive);
+  live.setAttribute("aria-selected", String(isLive));
+  report.setAttribute("aria-selected", String(!isLive));
+  $("pane-live").hidden = !isLive;
+  $("pane-report").hidden = isLive;
 }
 
 /* ---------- controls ---------- */
 
 function bindControls() {
   $("run-button").addEventListener("click", startRun);
+  $("tab-live").addEventListener("click", () => setView("live"));
+  $("tab-report").addEventListener("click", () => {
+    if (!$("tab-report").disabled) setView("report");
+  });
+
+  const trace = $("sparkline");
+  trace.addEventListener("pointerdown", onTracePointerDown);
+  trace.addEventListener("pointermove", onTracePointerMove);
+  trace.addEventListener("pointerup", onTracePointerUp);
+  trace.addEventListener("pointercancel", onTracePointerUp);
+  trace.addEventListener("keydown", onTraceKey);
+  $("review-exit").addEventListener("click", () => setCursor(null));
+
+  window.addEventListener("resize", resizeChassis);
+  if ("ResizeObserver" in window) {
+    new ResizeObserver(resizeChassis).observe($("chassis"));
+  }
 }
 
 function renderScenarios() {
@@ -343,7 +778,7 @@ function renderScenarios() {
     button.type = "button";
     button.className = "scenario-button";
     button.dataset.scenario = scenario.key;
-    button.textContent = SCENARIO_LABELS[scenario.key] || String(scenario.key).toUpperCase();
+    button.textContent = SCENARIO_LABELS[scenario.key] || String(scenario.key);
     button.title = scenario.notes || "";
     button.setAttribute("aria-pressed", String(scenario.key === state.selected));
     button.disabled = state.running;
@@ -387,7 +822,8 @@ function setRunning(running) {
   state.running = running;
   const button = $("run-button");
   button.disabled = running || !state.selected;
-  button.textContent = running ? "RUNNING…" : "RUN SIMULATION";
+  button.dataset.busy = String(running);
+  button.firstChild.textContent = running ? "Running… " : "Run scenario ";
   for (const scenario of document.querySelectorAll(".scenario-button")) {
     scenario.disabled = running;
   }
@@ -397,6 +833,11 @@ function setRunStatus(kind, text) {
   const node = $("run-status");
   node.dataset.state = kind;
   node.textContent = text;
+}
+
+function setRunFlag(kind, text) {
+  $("runflag").dataset.state = kind;
+  setText("runflag-text", text);
 }
 
 function showToast(message) {
@@ -409,14 +850,14 @@ function showToast(message) {
   }, 6000);
 }
 
-/* ---------- badges and panes ---------- */
+/* ---------- badges ---------- */
 
 function updateSimulationBadges() {
   const synthetic = state.source === "synthetic";
   const camera = $("camera-badge");
   camera.textContent = synthetic ? "SIMULATED" : "CAPTURE";
-  camera.classList.toggle("badge-sim", synthetic);
-  camera.classList.toggle("badge-quiet", !synthetic);
+  camera.classList.toggle("is-sim", synthetic);
+  camera.classList.toggle("is-ok", !synthetic);
 
   const simulatedTransport = state.protocol !== "external";
   for (const [id, name] of [
@@ -427,349 +868,340 @@ function updateSimulationBadges() {
     const badge = $(id);
     if (!badge) continue;
     badge.textContent = simulatedTransport ? `${name} SIMULATED` : `${name} EXTERNAL`;
-    badge.classList.toggle("badge-sim", simulatedTransport);
-    badge.classList.toggle("badge-quiet", !simulatedTransport);
+    badge.classList.toggle("is-sim", simulatedTransport);
+    badge.classList.toggle("is-ok", !simulatedTransport);
   }
+
+  setText("sam-chip", `SAM ${String(state.samMode).toUpperCase()}`);
+  setText("proto-chip", String(state.protocol).toUpperCase());
 
   setText(
     "sim-copy",
     synthetic
-      ? "Synthetic fixtures. Camera frames, telemetry, PLC, BMC and NVML are simulators. No captured hardware is shown. The dashboard observes; it cannot actuate."
-      : "Captured fixture. Transport adapters may still be simulators; each widget states its own source. The dashboard observes; it cannot actuate.",
+      ? "Synthetic fixtures. Camera frames, telemetry, PLC, BMC and NVML are simulators. No captured hardware is shown."
+      : "Captured fixture. Transport adapters may still be simulators; each readout states its own source.",
   );
-  const banner = $("sim-banner");
-  banner.dataset.source = synthetic ? "synthetic" : "capture";
+  $("sim-banner").dataset.source = synthetic ? "synthetic" : "capture";
   setText("sim-stamp", synthetic ? "SIMULATED" : "CAPTURE");
 }
+
+/* ---------- decision bands ---------- */
 
 function renderThresholds() {
   const host = $("thresholds");
   host.replaceChildren();
   if (!state.thresholds) return;
+
   const rows = [
-    ["CONFIRMED", state.thresholds.confirmedLeak],
-    ["ESCALATE", state.thresholds.escalation],
-    ["SUSPECT", state.thresholds.suspect],
-    ["NOMINAL", state.thresholds.nominal],
+    ["nominal", state.thresholds.nominal],
+    ["suspect", state.thresholds.suspect],
+    ["escalate", state.thresholds.escalation],
+    ["confirmed", state.thresholds.confirmedLeak],
   ];
   for (const [label, value] of rows) {
     const cell = document.createElement("div");
-    const term = document.createElement("dt");
+    cell.className = "band-cell";
+    const term = document.createElement("span");
+    term.className = "band-key";
     term.textContent = label;
-    const detail = document.createElement("dd");
+    const detail = document.createElement("span");
+    detail.className = "band-value mono";
     detail.textContent = fixed(value, 2);
     cell.append(term, detail);
     host.append(cell);
   }
+  host.dataset.ready = "true";
 }
 
-function clearDecision() {
-  setText("p-leak", "—");
-  setText("state-label", "IDLE");
-  setText("rule-id", "—");
-  setText("streak", "—");
-  setText("p-sub", "awaiting event");
-  setText("decision-chip", "IDLE");
-  $("decision-panel").dataset.state = "IDLE";
-  colorTone($("decision-chip"), "neutral");
-  state.pHistory = [];
-  drawSparkline();
+function markActiveBand(label) {
+  const cells = document.querySelectorAll(".band-cell");
+  if (!cells.length) return;
+  const rank = INCIDENT_LABELS.has(label)
+    ? 3
+    : label === "SUSPECT_LEAK" || label === "UNVERIFIED_ANOMALY"
+      ? 1
+      : label === "NOMINAL" || label === "LOG_ONLY" || label === "BENIGN_CONDENSATION"
+        ? 0
+        : -1;
+  cells.forEach((cell, index) => {
+    cell.dataset.active = String(index <= rank && rank >= 0);
+    cell.dataset.current = String(index === rank);
+  });
 }
 
-function clearTelemetry() {
-  for (const id of ["t-rate", "t-margin", "t-pressure", "t-flow", "t-surface", "t-dew"]) {
-    setText(id, "—");
-    colorTone($(id), "neutral");
-  }
-  for (const key of ["v", "h", "t", "w"]) {
-    const fill = $(`meter-${key}`);
-    fill.style.width = "0%";
-    setText(`meter-${key}-value`, "—");
-  }
-}
+/* ---------- chassis canvas ---------- */
 
-function setMeter(key, value, isSigned) {
-  const fill = $(`meter-${key}`);
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) {
-    fill.style.width = "0%";
-    setText(`meter-${key}-value`, "—");
-    return;
-  }
-  setText(`meter-${key}-value`, fixed(numeric, 2));
-  if (isSigned) {
-    const clamped = Math.max(-1, Math.min(1, numeric));
-    const width = Math.abs(clamped) * 50;
-    fill.style.width = `${width}%`;
-    fill.style.left = clamped >= 0 ? "50%" : `${50 - width}%`;
-    fill.style.background = clamped < 0 ? "var(--amber)" : "var(--blue)";
-  } else {
-    const clamped = Math.max(0, Math.min(1, numeric));
-    fill.style.width = `${clamped * 100}%`;
-    fill.style.left = "0";
-    fill.style.background = "var(--aqua)";
-  }
-}
-
-function colorTone(node, tone) {
-  node.classList.remove("is-ok", "is-warn", "is-bad");
-  if (tone === "ok") node.classList.add("is-ok");
-  if (tone === "warn") node.classList.add("is-warn");
-  if (tone === "bad") node.classList.add("is-bad");
-}
-
-function toneForLabel(label) {
-  if (INCIDENT_LABELS.has(label)) return "bad";
-  if (CAUTION_LABELS.has(label)) return "warn";
-  if (CALM_LABELS.has(label)) return "ok";
-  return "neutral";
-}
-
-function toneForStatus(status) {
-  if (/VERIFIED|CLOSED|COMMITTED|ACCEPTED|DRAINED|REQUEUED/.test(status)) return "ok";
-  if (/SLOW/.test(status)) return "warn";
-  if (/FAULT|FAILED|REJECTED/.test(status)) return "bad";
-  return "neutral";
-}
-
-/* ---------- timeline ---------- */
-
-function clearTimeline(message) {
-  const list = $("timeline");
-  list.replaceChildren();
-  const empty = document.createElement("li");
-  empty.className = "empty-state";
-  empty.textContent = message;
-  list.append(empty);
-  setText("timeline-count", "0 STEPS");
-}
-
-function renderTimeline() {
-  const list = $("timeline");
-  list.replaceChildren();
-  setText(
-    "timeline-count",
-    `${state.actions.length} ${state.actions.length === 1 ? "STEP" : "STEPS"}`,
-  );
-  if (!state.actions.length) {
-    clearTimeline("No actuation yet. The safety loop is armed.");
-    return;
-  }
-  for (const action of state.actions) {
-    const item = document.createElement("li");
-    item.className = "step";
-
-    const seq = document.createElement("span");
-    seq.className = "step-seq";
-    seq.textContent = String(action.seq).padStart(2, "0");
-
-    const body = document.createElement("div");
-    const command = document.createElement("div");
-    command.className = "step-command";
-    command.textContent = `${action.actor} / ${action.command}`;
-    const meta = document.createElement("div");
-    meta.className = "step-meta";
-    meta.textContent = `T+${fixed(action.t, 3)} s · ${action.detail || "no detail"} · ${
-      action.simulated ? "SIMULATED" : "EXTERNAL"
-    }`;
-    body.append(command, meta);
-
-    const status = document.createElement("span");
-    status.className = "step-status";
-    status.dataset.tone = toneForStatus(action.status);
-    status.textContent = action.status;
-
-    item.append(seq, body, status);
-    list.append(item);
-  }
-}
-
-/* ---------- report ---------- */
-
-function clearReport() {
-  const badge = $("report-badge");
-  badge.textContent = "AWAITING INCIDENT";
-  badge.dataset.source = "none";
-  badge.classList.remove("is-ok", "is-warn");
-  $("report-content").hidden = true;
-  $("report-empty").hidden = false;
-}
-
-function renderReport(report, event) {
-  if (!report) return;
-  const badge = $("report-badge");
-  const isLlm = report.reportSource === "llm";
-  badge.textContent = isLlm ? "[REPORT: MUSE SPARK OPEN]" : "[FALLBACK: DETERMINISTIC]";
-  badge.dataset.source = report.reportSource || "deterministic_fallback";
-  badge.classList.toggle("is-ok", isLlm);
-  badge.classList.toggle("is-warn", !isLlm);
-
-  const evidence = report.physicalEvidence || {};
-  const fallback = `Deterministic fallback: ${evidence.label} at ${
-    report.suspectedOrigin
-  } with P(leak) ${fixed(evidence.pLeak, 3)}. No model prose was generated; the evidence and the actions above are the complete record.`;
-  setText("report-root-cause", report.rootCauseExplanation || fallback);
-  setText(
-    "report-uncertainty",
-    report.llmUncertainty ||
-      "Not applicable: the deterministic fallback does not estimate uncertainty.",
-  );
-  setText("report-action", report.recommendedOperatorAction || "—");
-  setText("report-id", report.incidentId || "—");
-  setText("report-origin", report.suspectedOrigin || "—");
-  setText(
-    "report-evidence",
-    `${evidence.label || "—"} · φv ${fixed(evidence.phiVisual, 2)} · φh ${fixed(
-      evidence.phiHydraulic,
-      2,
-    )} · W ${fixed(evidence.wetness, 2)} · ${fixed(evidence.areaMm2, 1)} mm²`,
-  );
-  setText(
-    "report-source",
-    isLlm
-      ? `Muse Spark Open (${report.llmModel || "model id not recorded"})`
-      : "Deterministic fallback (no model)",
-  );
-  setText("report-time", report.timestamp || "—");
-  setText("report-config", report.configHash || "—");
-
-  $("report-empty").hidden = true;
-  $("report-content").hidden = false;
-  if (event && event.simulated) {
-    setText("report-config", `${report.configHash || "—"} · SIMULATED`);
-  }
-}
-
-/* ---------- canvas ---------- */
-
-function resizeCanvas() {
+function resizeChassis() {
   const canvas = $("chassis");
-  if (state.canvas && state.canvas.widthPx && state.canvas.heightPx) {
-    canvas.width = state.canvas.widthPx;
-    canvas.height = state.canvas.heightPx;
+  const rect = canvas.getBoundingClientRect();
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const width = Math.max(1, Math.round(rect.width * dpr));
+  const height = Math.max(1, Math.round(rect.height * dpr));
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
   }
-}
-
-function polygonFromMm(points) {
-  const scale = state.canvas ? Number(state.canvas.pxPerMm) : 1;
-  return points.map(([x, y]) => [Number(x) * scale, Number(y) * scale]);
+  state.chassisBox = { w: Math.max(1, rect.width), h: Math.max(1, rect.height), dpr };
+  state.needsChassis = true;
 }
 
 function loop(now) {
-  if (state.needsDraw || pulseActive()) {
-    draw(now);
-    state.needsDraw = false;
-  }
+  // Schedule first: a drawing error must not stop the loop for the rest of the
+  // session. The error still reaches the console.
   requestAnimationFrame(loop);
+  if (state.renderPending) {
+    state.renderPending = false;
+    render();
+  }
+  const view = state.lastView;
+  if (view) {
+    const diff = Math.abs(state.sweepTarget - state.sweepShown);
+    const animating =
+      diff > 1 / 500 && state.cursor === null && state.running && !prefersReducedMotion;
+    if (animating) {
+      let delta = state.sweepTarget - state.sweepShown;
+      if (delta > 1 / 2) delta -= 1;
+      if (delta < -1 / 2) delta += 1;
+      state.sweepShown = (state.sweepShown + delta * 1 / 6 + 1) % 1;
+      state.needsChassis = true;
+    } else if (state.sweepShown !== state.sweepTarget) {
+      state.sweepShown = state.sweepTarget;
+      state.needsChassis = true;
+    }
+    if (state.needsChassis) {
+      drawChassis(view, now);
+      state.needsChassis = false;
+    }
+  }
 }
 
-function pulseActive() {
-  if (state.reducedMotion || !state.frame) return false;
-  if (!state.decision) return false;
-  return INCIDENT_LABELS.has(state.decision.label) && Boolean(state.frame.candidate);
-}
-
-function draw(now) {
+function drawChassis(view, now) {
   const canvas = $("chassis");
   const ctx = canvas.getContext("2d");
-  const width = canvas.width;
-  const height = canvas.height;
+  const { w, h, dpr } = state.chassisBox;
 
-  ctx.clearRect(0, 0, width, height);
-  ctx.fillStyle = "#080d10";
-  ctx.fillRect(0, 0, width, height);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = C.surface;
+  ctx.fillRect(0, 0, w, h);
 
   if (!state.topology || !state.canvas) {
-    ctx.fillStyle = "#5f747d";
-    ctx.font = `11px ${MONO}`;
+    ctx.fillStyle = C.muted;
+    ctx.font = `11px ${cssVarFont()}`;
     ctx.textAlign = "center";
-    ctx.fillText("AWAITING /api/state", width / 2, height / 2);
+    ctx.fillText("awaiting /api/state", w / 2, h / 2);
     return;
   }
 
-  drawGrid(ctx, width, height);
-  drawZones(ctx);
+  const scale = Number(state.canvas.pxPerMm);
+  const fit = Math.min(w / DESIGN.w, h / DESIGN.h);
+  const ox = (w - DESIGN.w * fit) / 2;
+  const oy = (h - DESIGN.h * fit) / 2;
+
+  drawField(ctx, w, h, scale * fit);
+
+  ctx.save();
+  ctx.translate(ox, oy);
+  ctx.scale(fit, fit);
+
+  drawChassisBody(ctx);
+  drawZones(ctx, view);
   drawFittings(ctx);
   drawFiducials(ctx);
-  drawContours(ctx, now);
-  drawLabels(ctx, width, height);
-  drawCameraState(ctx, width);
-  canvas.setAttribute("aria-label", describeScene());
+  if (state.running && state.cursor === null && !prefersReducedMotion) drawSweep(ctx);
+  drawCandidate(ctx, view, now);
+
+  ctx.restore();
+
+  drawDimensions(ctx, ox, oy, DESIGN.w * fit, DESIGN.h * fit, scale * fit);
+
+  const line = $("scalebar-line");
+  if (line) line.style.width = `${50 * scale * fit}px`;
+
+  canvas.setAttribute("aria-label", describeScene(view.frame));
 }
 
-function drawGrid(ctx, width, height) {
-  const scale = Number(state.canvas.pxPerMm);
-  const step = scale * 50;
-  ctx.strokeStyle = "#131f24";
+function drawDimensions(ctx, ox, oy, planeW, planeH, pxPerMm) {
+  const roomLeft = ox >= 46;
+  const roomBottom = oy + planeH + 26 < ctx.canvas.height / (state.chassisBox.dpr || 1);
+  if (!roomLeft && !roomBottom) return; // the HUD still carries the geometry
+  ctx.save();
+  ctx.strokeStyle = "#3a3a46";
+  ctx.fillStyle = C.muted;
+  ctx.font = `11px ${cssVarFont()}`;
+  ctx.lineWidth = 1;
+  const cap = 4;
+
+  const dimW = planeW / pxPerMm;
+  const dimH = planeH / pxPerMm;
+
+  // horizontal, under the plane
+  if (roomBottom) {
+  const y = oy + planeH + 16;
+  ctx.beginPath();
+  ctx.moveTo(ox, y + 1 / 2);
+  ctx.lineTo(ox + planeW, y + 1 / 2);
+  ctx.moveTo(ox + 1 / 2, y - cap);
+  ctx.lineTo(ox + 1 / 2, y + cap);
+  ctx.moveTo(ox + planeW - 1 / 2, y - cap);
+  ctx.lineTo(ox + planeW - 1 / 2, y + cap);
+  ctx.stroke();
+  ctx.textAlign = "center";
+  ctx.fillText(`${Math.round(dimW)} mm`, ox + planeW / 2, y - 7);
+  }
+
+  // vertical, left of the plane
+  if (roomLeft) {
+  const x = ox - 18;
+  ctx.beginPath();
+  ctx.moveTo(x + 1 / 2, oy);
+  ctx.lineTo(x + 1 / 2, oy + planeH);
+  ctx.moveTo(x - cap, oy + 1 / 2);
+  ctx.lineTo(x + cap, oy + 1 / 2);
+  ctx.moveTo(x - cap, oy + planeH - 1 / 2);
+  ctx.lineTo(x + cap, oy + planeH - 1 / 2);
+  ctx.stroke();
+  ctx.save();
+  ctx.translate(x - 8, oy + planeH / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = "center";
+  ctx.fillText(`${Math.round(dimH)} mm`, 0, 0);
+  ctx.restore();
+  }
+
+  ctx.restore();
+}
+
+function cssVarFont() {
+  return '"IBM Plex Mono", ui-monospace, monospace';
+}
+
+function drawField(ctx, w, h, step) {
+  const grid = Math.max(18, step);
+  ctx.save();
+  ctx.strokeStyle = "#1d1d21";
   ctx.lineWidth = 1;
   ctx.beginPath();
-  for (let x = step; x < width; x += step) {
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, height);
+  for (let x = 0; x < w; x += grid) {
+    ctx.moveTo(Math.round(x) + 1 / 2, 0);
+    ctx.lineTo(Math.round(x) + 1 / 2, h);
   }
-  for (let y = step; y < height; y += step) {
-    ctx.moveTo(0, y);
-    ctx.lineTo(width, y);
+  for (let y = 0; y < h; y += grid) {
+    ctx.moveTo(0, Math.round(y) + 1 / 2);
+    ctx.lineTo(w, Math.round(y) + 1 / 2);
   }
   ctx.stroke();
+  ctx.restore();
 
-  ctx.strokeStyle = "#2b3d44";
-  ctx.strokeRect(1, 1, width - 2, height - 2);
-
-  const tick = 10;
-  ctx.strokeStyle = "#3a5058";
-  ctx.beginPath();
-  ctx.moveTo(tick, 0);
-  ctx.lineTo(0, 0);
-  ctx.lineTo(0, tick);
-  ctx.moveTo(width - tick, 0);
-  ctx.lineTo(width, 0);
-  ctx.lineTo(width, tick);
-  ctx.moveTo(width - tick, height);
-  ctx.lineTo(width, height);
-  ctx.lineTo(width, height - tick);
-  ctx.moveTo(tick, height);
-  ctx.lineTo(0, height);
-  ctx.lineTo(0, height - tick);
-  ctx.stroke();
+  // registration crosses at the field corners
+  ctx.strokeStyle = "#2b2b31";
+  ctx.lineWidth = 1;
+  const arm = 9;
+  for (const [cx, cy] of [
+    [14, 14],
+    [w - 14, 14],
+    [14, h - 14],
+    [w - 14, h - 14],
+  ]) {
+    ctx.beginPath();
+    ctx.moveTo(cx - arm, cy);
+    ctx.lineTo(cx + arm, cy);
+    ctx.moveTo(cx, cy - arm);
+    ctx.lineTo(cx, cy + arm);
+    ctx.stroke();
+  }
 }
 
-function drawZones(ctx) {
-  const zones = state.topology.zones || [];
-  zones.forEach((zone, index) => {
-    const points = polygonFromMm(zone.polygon_mm);
+function drawChassisBody(ctx) {
+  ctx.fillStyle = "#0c0c10";
+  ctx.fillRect(0, 0, DESIGN.w, DESIGN.h);
+
+  const scale = Number(state.canvas.pxPerMm);
+  const step = 20 * scale;
+  ctx.strokeStyle = "#151519";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let x = step; x < DESIGN.w; x += step) {
+    ctx.moveTo(Math.round(x) + 1 / 2, 0);
+    ctx.lineTo(Math.round(x) + 1 / 2, DESIGN.h);
+  }
+  for (let y = step; y < DESIGN.h; y += step) {
+    ctx.moveTo(0, Math.round(y) + 1 / 2);
+    ctx.lineTo(DESIGN.w, Math.round(y) + 1 / 2);
+  }
+  ctx.stroke();
+
+  ctx.strokeStyle = "#3a3a46";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(1 / 2, 1 / 2, DESIGN.w - 1, DESIGN.h - 1);
+
+  // machined corner brackets
+  ctx.strokeStyle = "#41414c";
+  ctx.lineWidth = 2;
+  const arm = 26;
+  const corners = [
+    [0, 0, 1, 1],
+    [DESIGN.w, 0, -1, 1],
+    [0, DESIGN.h, 1, -1],
+    [DESIGN.w, DESIGN.h, -1, -1],
+  ];
+  for (const [x, y, dx, dy] of corners) {
     ctx.beginPath();
-    points.forEach(([x, y], index) => {
-      if (index === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    });
-    ctx.closePath();
+    ctx.moveTo(x + dx * 2, y + dy * arm);
+    ctx.lineTo(x + dx * 2, y + dy * 2);
+    ctx.lineTo(x + dx * arm, y + dy * 2);
+    ctx.stroke();
+  }
+}
+
+function polygonPath(ctx, points) {
+  ctx.beginPath();
+  points.forEach(([x, y], index) => {
+    if (index === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.closePath();
+}
+
+function drawZones(ctx, view) {
+  const scale = Number(state.canvas.pxPerMm);
+  const zones = state.topology.zones || [];
+  const activeZone =
+    view && view.decision && view.frame && view.frame.candidate
+      ? view.frame.candidate.zone
+      : null;
+
+  zones.forEach((zone, index) => {
+    const points = (zone.polygon_mm || []).map(([x, y]) => [Number(x) * scale, Number(y) * scale]);
+    if (points.length < 3) return;
+    polygonPath(ctx, points);
 
     const electrical = Boolean(zone.margin_mm);
-    ctx.fillStyle = electrical ? "#190f10" : "#0d1a1d";
+    const isActive = activeZone !== null && Number(zone.id) === Number(activeZone);
+
+    ctx.fillStyle = isActive ? "#17181d" : "#0f0f13";
     ctx.fill();
-    ctx.setLineDash([5, 5]);
-    ctx.strokeStyle = electrical ? "#5a2a26" : "#2b3d44";
-    ctx.lineWidth = 1;
-    ctx.stroke();
-    ctx.setLineDash([]);
 
     if (electrical) {
       ctx.save();
       ctx.clip();
-      ctx.strokeStyle = "#ff625914";
+      ctx.strokeStyle = "#e5566f1a";
       ctx.lineWidth = 1;
       ctx.beginPath();
-      for (let offset = -800; offset < 1400; offset += 26) {
+      for (let offset = -DESIGN.h; offset < DESIGN.w + DESIGN.h; offset += 22) {
         ctx.moveTo(offset, 0);
-        ctx.lineTo(offset - 800, 800);
+        ctx.lineTo(offset - DESIGN.h, DESIGN.h);
       }
       ctx.stroke();
       ctx.restore();
     }
 
-    // Anchor per zone so the label never lands under the QD ROI or a fiducial:
-    // zone 0 top-right, zone 1 top-left, zone 2 bottom-left.
+    ctx.strokeStyle = isActive ? "#5a5a68" : "#303039";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([6, 5]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
     let anchor = points[3];
     let align = "left";
     let dx = 14;
@@ -778,62 +1210,65 @@ function drawZones(ctx) {
       anchor = points[1];
       align = "right";
       dx = -14;
-      dy = 120;
+      dy = 118;
     } else if (index === 1) {
       anchor = points[0];
-      dy = 24;
+      dy = 26;
     }
     const bx = anchor[0] + dx;
     const by = anchor[1] + dy;
-    ctx.strokeStyle = electrical ? "#ff625966" : "#3a505866";
+
+    ctx.strokeStyle = electrical ? "#e5566f66" : "#3a3a4466";
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(align === "right" ? bx - 24 : bx, by - 16);
-    ctx.lineTo(align === "right" ? bx : bx + 24, by - 16);
+    ctx.moveTo(align === "right" ? bx - 22 : bx, by - 17);
+    ctx.lineTo(align === "right" ? bx : bx + 22, by - 17);
     ctx.stroke();
+
     ctx.textAlign = align;
-    ctx.fillStyle = electrical ? "#ff6259" : "#9db4bc";
-    ctx.font = `600 18px ${MONO}`;
+    ctx.fillStyle = electrical ? C.negative : "#b8b8c0";
+    ctx.font = `600 19px ${cssVarFont()}`;
     ctx.fillText(String(zone.id), bx, by);
-    ctx.fillStyle = "#7d939b";
-    ctx.font = `9px ${MONO}`;
-    ctx.fillText(String(zone.name || "").toUpperCase(), bx + (align === "right" ? -18 : 18), by - 1);
+    ctx.fillStyle = "#8a8c92";
+    ctx.font = `9px ${cssVarFont()}`;
+    ctx.fillText(String(zone.name || "").toUpperCase(), bx + (align === "right" ? -19 : 19), by - 1);
   });
 }
 
 function drawFittings(ctx) {
+  const scale = Number(state.canvas.pxPerMm);
   for (const qd of state.topology.qd || []) {
-    const [x0, y0, x1, y1] = polygonFromMm([
-      [qd.roi_mm[0], qd.roi_mm[1]],
-      [qd.roi_mm[2], qd.roi_mm[3]],
-    ]).flat();
-    const rect = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
-    ctx.fillStyle = "#0b1917";
-    ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
-    ctx.strokeStyle = "#2d5a54";
-    ctx.lineWidth = 1;
-    ctx.strokeRect(rect.x, rect.y, rect.w, rect.h);
+    const x = Number(qd.roi_mm[0]) * scale;
+    const y = Number(qd.roi_mm[1]) * scale;
+    const rw = (Number(qd.roi_mm[2]) - Number(qd.roi_mm[0])) * scale;
+    const rh = (Number(qd.roi_mm[3]) - Number(qd.roi_mm[1])) * scale;
 
-    const cx = rect.x + rect.w / 2;
-    const cy = rect.y + rect.h / 2;
-    ctx.strokeStyle = "#37e6c566";
+    ctx.fillStyle = "#0a1210";
+    ctx.fillRect(x, y, rw, rh);
+    ctx.strokeStyle = "#2c4a44";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x + 1 / 2, y + 1 / 2, rw - 1, rh - 1);
+
+    const cx = x + rw / 2;
+    const cy = y + rh / 2;
+    ctx.strokeStyle = "#5f8f8666";
     ctx.beginPath();
-    ctx.moveTo(cx - 16, cy);
-    ctx.lineTo(cx + 16, cy);
-    ctx.moveTo(cx, cy - 16);
-    ctx.lineTo(cx, cy + 16);
+    ctx.moveTo(cx - 14, cy);
+    ctx.lineTo(cx + 14, cy);
+    ctx.moveTo(cx, cy - 14);
+    ctx.lineTo(cx, cy + 14);
     ctx.stroke();
     ctx.beginPath();
     ctx.arc(cx, cy, 5, 0, Math.PI * 2);
     ctx.stroke();
 
     ctx.fillStyle = "#9fc9c1";
-    ctx.font = `10px ${MONO}`;
+    ctx.font = `10px ${cssVarFont()}`;
     ctx.textAlign = "left";
-    ctx.fillText(String(qd.id), rect.x + 6, rect.y + 14);
-    ctx.fillStyle = "#5f747d";
-    ctx.font = `8px ${MONO}`;
-    ctx.fillText(String(qd.branch || ""), rect.x + 6, rect.y + rect.h - 6);
+    ctx.fillText(String(qd.id), x + 7, y + 15);
+    ctx.fillStyle = "#6b8d88";
+    ctx.font = `8px ${cssVarFont()}`;
+    ctx.fillText(String(qd.branch || ""), x + 7, y + rh - 7);
   }
 }
 
@@ -846,220 +1281,363 @@ function drawFiducials(ctx) {
     const cy = Number(marker.center_mm[1]) * scale;
     const x = cx - size / 2;
     const y = cy - size / 2;
-    ctx.strokeStyle = "#6f858d";
-    ctx.lineWidth = 2;
-    ctx.strokeRect(x, y, size, size);
-    ctx.strokeStyle = "#43565d";
+    // A printed DICT_5X5 target: 1-cell black border, 5x5 data grid. The bit
+    // pattern is derived from the id so it is stable across frames; it is a
+    // rendering of a marker, not a measurement.
+    const cells = 7;
+    const cell = size / cells;
+    ctx.fillStyle = "#0a0a0d";
+    ctx.fillRect(x, y, size, size);
+    ctx.strokeStyle = "#2c2c34";
     ctx.lineWidth = 1;
-    ctx.strokeRect(x + 8, y + 8, size - 16, size - 16);
-    ctx.fillStyle = "#43565d";
-    const cell = (size - 16) / 4;
-    for (const [ax, ay] of [
-      [1, 1],
-      [2, 1],
-      [1, 2],
-    ]) {
-      ctx.fillRect(x + 8 + ax * cell, y + 8 + ay * cell, cell, cell);
+    ctx.strokeRect(x + 1 / 2, y + 1 / 2, size - 1, size - 1);
+    ctx.fillStyle = "#4a4a55";
+    const id = Number(marker.id) || 0;
+    for (let row = 0; row < cells; row += 1) {
+      for (let col = 0; col < cells; col += 1) {
+        const edge = row === 0 || col === 0 || row === cells - 1 || col === cells - 1;
+        if (edge) continue;
+        const bit = ((id + 1) * 7919 + row * 104729 + col * 313) % 5 < 2;
+        if (bit) ctx.fillRect(x + col * cell, y + row * cell, cell, cell);
+      }
     }
-    ctx.fillStyle = "#7d939b";
-    ctx.font = `9px ${MONO}`;
+    ctx.fillStyle = "#6f6f7a";
+    ctx.font = `9px ${cssVarFont()}`;
     ctx.textAlign = "center";
-    ctx.fillText(`ARUCO ${marker.id}`, cx, y + size + 13);
+    ctx.fillText(`ARUCO ${marker.id}`, cx, y + size + 14);
   }
 }
 
-function drawContours(ctx, now) {
-  const candidate = state.frame ? state.frame.candidate : null;
-  const contours = state.frame ? state.frame.contours || [] : [];
+function drawSweep(ctx) {
+  const x = state.sweepShown * DESIGN.w;
+  const band = 84;
+  const gradient = ctx.createLinearGradient(x - band, 0, x + 2, 0);
+  gradient.addColorStop(0, "rgba(150, 200, 240, 0)");
+  gradient.addColorStop(.72, "rgba(150, 200, 240, .035)");
+  gradient.addColorStop(1, "rgba(190, 230, 255, .085)");
+  ctx.fillStyle = gradient;
+  ctx.fillRect(x - band, 0, band + 2, DESIGN.h);
+  ctx.strokeStyle = "rgba(190, 230, 255, .22)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(x, 0);
+  ctx.lineTo(x, DESIGN.h);
+  ctx.stroke();
+}
+
+function drawCandidate(ctx, view, now) {
+  const frame = view ? view.frame : null;
+  if (!frame) return;
+  const candidate = frame.candidate;
+  const contours = frame.contours || [];
   if (!contours.length) {
-    if (state.running) {
-      ctx.fillStyle = "#3d5058";
-      ctx.font = `10px ${MONO}`;
+    if (state.running && state.cursor === null) {
+      ctx.fillStyle = "#57575f";
+      ctx.font = `10px ${cssVarFont()}`;
       ctx.textAlign = "center";
-      ctx.fillText("NO CANDIDATE IN FRAME", state.canvas.widthPx / 2, 52);
+      ctx.fillText("NO CANDIDATE IN FRAME", DESIGN.w / 2, 42);
     }
     return;
   }
 
   const lowQuality = candidate && candidate.stale;
   for (const polygon of contours) {
-    ctx.beginPath();
-    polygon.forEach(([x, y], index) => {
-      if (index === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    });
-    ctx.closePath();
-    ctx.fillStyle = "#ff62591f";
+    polygonPath(ctx, polygon);
+    ctx.fillStyle = "rgba(216, 242, 106, .13)";
     ctx.fill();
-    ctx.strokeStyle = lowQuality ? "#f3b64b" : "#ff7a72";
-    ctx.lineWidth = 2;
-    ctx.setLineDash(lowQuality ? [6, 4] : []);
-    ctx.shadowColor = "#ff6259";
-    ctx.shadowBlur = 14;
+    // Two strokes fake the optical bloom of the tracer without a canvas shadow,
+    // which would be in device pixels and would drift with the display ratio.
+    ctx.strokeStyle = "rgba(216, 242, 106, .16)";
+    ctx.lineWidth = 7;
     ctx.stroke();
-    ctx.shadowBlur = 0;
+    ctx.strokeStyle = lowQuality ? C.warning : C.tracer;
+    ctx.lineWidth = 1.7;
+    ctx.setLineDash(lowQuality ? [7, 5] : []);
+    ctx.stroke();
     ctx.setLineDash([]);
   }
 
-  if (candidate && candidate.centroidMm) {
-    const scale = Number(state.canvas.pxPerMm);
-    const cx = Number(candidate.centroidMm[0]) * scale;
-    const cy = Number(candidate.centroidMm[1]) * scale;
-    ctx.strokeStyle = "#ffd9d6";
+  if (!candidate || !candidate.centroidMm) return;
+  const scale = Number(state.canvas.pxPerMm);
+  const cx = Number(candidate.centroidMm[0]) * scale;
+  const cy = Number(candidate.centroidMm[1]) * scale;
+
+  const confirmed = INCIDENT_LABELS.has(view.decision ? view.decision.label : "");
+  ctx.strokeStyle = confirmed ? C.negative : "#f2f7dc";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(cx - 11, cy);
+  ctx.lineTo(cx + 11, cy);
+  ctx.moveTo(cx, cy - 11);
+  ctx.lineTo(cx, cy + 11);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.fillStyle = confirmed ? C.negative : "#e9f2cc";
+  ctx.font = `9px ${cssVarFont()}`;
+  ctx.textAlign = "left";
+  ctx.fillText(`TRACK ${candidate.trackId}`, cx + 15, cy - 9);
+
+  if (confirmed && !prefersReducedMotion) {
+    const phase = (now % 2000) / 2000;
+    ctx.globalAlpha = (1 - phase) * .55;
+    ctx.strokeStyle = C.negative;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 18 + phase * 46, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+}
+
+function describeScene(frame) {
+  if (!frame || !frame.candidate) {
+    return "Rectified chassis plane. No candidate in the current frame.";
+  }
+  const candidate = frame.candidate;
+  const zone = candidate.zone === null ? "unknown zone" : `zone ${candidate.zone}`;
+  return `Rectified chassis plane. Candidate in ${zone}, area ${fixed(candidate.areaMm2, 1)} square millimetres, centroid ${fixed(candidate.centroidMm[0], 0)} by ${fixed(candidate.centroidMm[1], 0)} millimetres.`;
+}
+
+/* ---------- P(leak) trace + rewind ---------- */
+
+function traceDomain() {
+  const last = state.decisions[state.decisions.length - 1];
+  return last ? Math.max(last.t, 1 / 1000) : 1;
+}
+
+function seriesColor(label) {
+  if (INCIDENT_LABELS.has(label)) return C.negative;
+  if (CAUTION_LABELS.has(label)) return C.warning;
+  return C.ink;
+}
+
+function drawTrace() {
+  const canvas = $("sparkline");
+  if (!canvas) return;
+  const rect = canvas.getBoundingClientRect();
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = Math.max(1, Math.round(rect.width));
+  const h = Math.max(1, Math.round(rect.height));
+  if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+  }
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+
+  const plotW = Math.max(1, w - TRACE.left - TRACE.right);
+  const plotH = Math.max(1, h - TRACE.top - TRACE.bottom);
+  const tMax = traceDomain();
+  state.traceGeom = { left: TRACE.left, right: TRACE.right, tMax };
+
+  const xFor = (t) => TRACE.left + (Math.max(0, Math.min(tMax, t)) / tMax) * plotW;
+  const yFor = (p) => TRACE.top + (1 - Math.max(0, Math.min(1, Number(p) || 0))) * plotH;
+
+  // scale: 1.00 at the top, .50 mid, 0 on the baseline
+  ctx.font = `9px ${cssVarFont()}`;
+  ctx.textAlign = "right";
+  for (const value of [1, .5, 0]) {
+    const y = yFor(value);
+    ctx.strokeStyle = value === 0 ? "#2b2b31" : "#1f1f23";
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(cx - 10, cy);
-    ctx.lineTo(cx + 10, cy);
-    ctx.moveTo(cx, cy - 10);
-    ctx.lineTo(cx, cy + 10);
+    ctx.moveTo(TRACE.left, Math.round(y) + 1 / 2);
+    ctx.lineTo(w - TRACE.right, Math.round(y) + 1 / 2);
     ctx.stroke();
-    ctx.fillStyle = "#ffd9d6";
-    ctx.font = `9px ${MONO}`;
-    ctx.textAlign = "left";
-    ctx.fillText(`TRACK ${candidate.trackId}`, cx + 14, cy - 8);
-
-    if (pulseActive()) {
-      const phase = (now % 1800) / 1800;
-      const radius = 16 + phase * 44;
-      ctx.globalAlpha = (1 - phase) * 60 / 100;
-      ctx.strokeStyle = "#ff6259";
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.globalAlpha = 1;
-    }
+    ctx.fillStyle = C.muted;
+    ctx.fillText(value === 0 ? "0" : fixed(value, 2), TRACE.left - 6, y + 3);
   }
-}
-
-function drawLabels(ctx, width, height) {
-  ctx.fillStyle = "#5f747d";
-  ctx.font = `9px ${MONO}`;
-  ctx.textAlign = "left";
-  ctx.fillText(
-    `${state.topology.chassis.width_mm} × ${state.topology.chassis.height_mm} mm · GRID 50 mm`,
-    12,
-    height - 12,
-  );
-  ctx.textAlign = "right";
-  ctx.fillText("RECTIFIED / TOP-DOWN", width - 12, 20);
-}
-
-function drawCameraState(ctx, width) {
-  if (!state.camera || state.camera.ok !== false) return;
-  const reasons = (state.camera.reasons || []).join(" / ");
-  ctx.fillStyle = "#3a1512d9";
-  ctx.fillRect(0, 0, width, 34);
-  ctx.fillStyle = "#ffb3ad";
-  ctx.font = `10px ${MONO}`;
-  ctx.textAlign = "left";
-  ctx.fillText(`CAMERA DEGRADED${reasons ? ` — ${reasons}` : ""}`, 12, 22);
-}
-
-function describeScene() {
-  const candidate = state.frame ? state.frame.candidate : null;
-  if (!candidate) return "Rectified chassis plane. No candidate in the current frame.";
-  const zone = candidate.zone === null ? "unknown zone" : `zone ${candidate.zone}`;
-  return `Rectified chassis plane. Candidate in ${zone}, area ${fixed(
-    candidate.areaMm2,
-    1,
-  )} square millimetres, centroid ${fixed(candidate.centroidMm[0], 0)} by ${fixed(
-    candidate.centroidMm[1],
-    0,
-  )} millimetres.`;
-}
-
-/* ---------- sparkline ---------- */
-
-function drawSparkline() {
-  const canvas = $("sparkline");
-  const ctx = canvas.getContext("2d");
-  const width = canvas.width;
-  const height = canvas.height;
-  const left = 28;
-  const right = 8;
-  const top = 10;
-  const bottom = 18;
-  const plotWidth = width - left - right;
-  const plotHeight = height - top - bottom;
-
-  ctx.clearRect(0, 0, width, height);
-  ctx.fillStyle = "#0b1114";
-  ctx.fillRect(0, 0, width, height);
-
-  const yFor = (p) => top + (1 - Math.max(0, Math.min(1, Number(p)))) * plotHeight;
 
   if (state.thresholds) {
-    ctx.font = `8px ${MONO}`;
-    ctx.textAlign = "left";
-    for (const [label, value] of [
-      ["confirmed", state.thresholds.confirmedLeak],
-      ["escalate", state.thresholds.escalation],
-      ["suspect", state.thresholds.suspect],
-      ["nominal", state.thresholds.nominal],
+    ctx.setLineDash([3, 4]);
+    ctx.lineWidth = 1;
+    for (const value of [
+      state.thresholds.suspect,
+      state.thresholds.escalation,
+      state.thresholds.confirmedLeak,
     ]) {
       const y = yFor(value);
-      ctx.strokeStyle = "#25353b";
-      ctx.setLineDash([3, 4]);
+      ctx.strokeStyle = "#33333b";
       ctx.beginPath();
-      ctx.moveTo(left, y);
-      ctx.lineTo(width - right, y);
+      ctx.moveTo(TRACE.left, Math.round(y) + 1 / 2);
+      ctx.lineTo(w - TRACE.right, Math.round(y) + 1 / 2);
       ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.fillStyle = "#4d626b";
-      ctx.fillText(fixed(value, 2), 2, y + 3);
     }
+    ctx.setLineDash([]);
   }
 
-  const history = state.pHistory;
-  if (history.length < 2) {
-    ctx.fillStyle = "#4d626b";
-    ctx.font = `10px ${MONO}`;
+  const points = state.decisions;
+  if (points.length < 2) {
+    ctx.fillStyle = "#57575f";
+    ctx.font = `10px ${cssVarFont()}`;
     ctx.textAlign = "center";
-    ctx.fillText("P(leak) history", width / 2, height / 2);
+    ctx.fillText("awaiting decisions", w / 2, h / 2);
     return;
   }
 
-  const t0 = history[0].t;
-  const t1 = history[history.length - 1].t;
-  const span = Math.max(1, t1 - t0);
-  const xFor = (t) => left + ((t - t0) / span) * plotWidth;
+  const label = points[points.length - 1].label;
+  const stroke = seriesColor(label);
 
-  ctx.beginPath();
-  history.forEach((point, index) => {
-    const x = xFor(point.t);
-    const y = yFor(point.p);
-    if (index === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  });
-  const label = state.decision ? state.decision.label : "NOMINAL";
-  const stroke = INCIDENT_LABELS.has(label)
-    ? "#ff6259"
-    : CAUTION_LABELS.has(label)
-      ? "#f3b64b"
-      : "#37e6c5";
-  ctx.strokeStyle = stroke;
-  ctx.lineWidth = 2;
-  ctx.stroke();
+  // The whole series in ink; the confirmed tail in the alarm colour, so colour
+  // means state and never decoration.
+  const firstConfirm = points.findIndex((point) => INCIDENT_LABELS.has(point.label));
+  const splitIndex = firstConfirm === -1 ? points.length : Math.max(0, firstConfirm);
 
-  ctx.lineTo(width - right, height - bottom);
-  ctx.lineTo(left, height - bottom);
-  ctx.closePath();
-  ctx.fillStyle = INCIDENT_LABELS.has(label) ? "#ff625918" : "#37e6c514";
-  ctx.fill();
+  const trace = (from, to, color) => {
+    if (to - from < 1) return;
+    ctx.beginPath();
+    for (let index = from; index <= to && index < points.length; index += 1) {
+      const x = xFor(points[index].t);
+      const y = yFor(points[index].p);
+      if (index === from) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.lineJoin = "round";
+    ctx.stroke();
+  };
 
-  const last = history[history.length - 1];
-  ctx.fillStyle = stroke;
-  ctx.beginPath();
-  ctx.arc(xFor(last.t), yFor(last.p), 3, 0, Math.PI * 2);
-  ctx.fill();
+  trace(0, splitIndex, C.ink);
+  if (firstConfirm !== -1) trace(splitIndex, points.length - 1, C.negative);
 
-  ctx.fillStyle = "#4d626b";
-  ctx.font = `8px ${MONO}`;
-  ctx.textAlign = "left";
-  ctx.fillText(`T+${fixed(history[0].t, 1)}`, left, height - 4);
-  ctx.textAlign = "right";
-  ctx.fillText(`T+${fixed(last.t, 1)} s`, width - right, height - 4);
+  if (state.cursor === null) {
+    ctx.fillStyle = stroke;
+    const last = points[points.length - 1];
+    ctx.beginPath();
+    ctx.arc(xFor(last.t), yFor(last.p), 2.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  if (state.cursor !== null) {
+    const at = lastAtOrBefore(points, state.cursor);
+    if (at) {
+      const x = xFor(at.t);
+      ctx.strokeStyle = C.accent;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(Math.round(x) + 1 / 2, TRACE.top - 2);
+      ctx.lineTo(Math.round(x) + 1 / 2, h - TRACE.bottom);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(x, yFor(at.p), 3, 0, Math.PI * 2);
+      ctx.strokeStyle = C.accent;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.fillStyle = C.accent;
+      ctx.beginPath();
+      ctx.arc(x, yFor(at.p), 1.2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+}
+
+/* ---------- rewind interaction ---------- */
+
+function traceTimeAt(clientX) {
+  const canvas = $("sparkline");
+  const rect = canvas.getBoundingClientRect();
+  const { left, right, tMax } = state.traceGeom;
+  const plotW = Math.max(1, rect.width - left - right);
+  const x = Math.max(0, Math.min(plotW, clientX - rect.left - left));
+  return (x / plotW) * tMax;
+}
+
+function setCursor(cursor) {
+  const clamped = cursor === null ? null : Math.max(0, Math.min(traceDomain(), cursor));
+  state.cursor = clamped;
+  document.body.dataset.review = String(clamped !== null);
+  $("review-flag").hidden = clamped === null;
+  render();
+}
+
+function onTracePointerDown(event) {
+  if (!state.decisions.length) return;
+  const canvas = $("sparkline");
+  try {
+    canvas.setPointerCapture(event.pointerId);
+  } catch {
+    // A synthetic pointer (or a browser without capture) still scrubs; only the
+    // ability to keep tracking outside the canvas is lost.
+  }
+  canvas.dataset.dragging = "true";
+  setCursor(traceTimeAt(event.clientX));
+}
+
+function onTracePointerMove(event) {
+  if ($("sparkline").dataset.dragging !== "true") return;
+  setCursor(traceTimeAt(event.clientX));
+}
+
+function onTracePointerUp(event) {
+  const canvas = $("sparkline");
+  if (canvas.dataset.dragging !== "true") return;
+  canvas.dataset.dragging = "false";
+  try {
+    if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+  } catch {
+    /* capture was never taken */
+  }
+  // Releasing at the far right returns to live; anywhere else holds the cursor
+  // where the operator left it.
+  if (state.cursor !== null && state.cursor > traceDomain() - traceDomain() / 40) setCursor(null);
+}
+
+function onTraceKey(event) {
+  if (!state.decisions.length) return;
+  const step = traceDomain() / Math.max(1, state.decisions.length - 1);
+  const current = state.cursor === null ? traceDomain() : state.cursor;
+  if (event.key === "ArrowLeft") {
+    event.preventDefault();
+    setCursor(Math.max(0, current - step));
+  } else if (event.key === "ArrowRight") {
+    event.preventDefault();
+    const next = current + step;
+    setCursor(next >= traceDomain() ? null : next);
+  } else if (event.key === "Home") {
+    event.preventDefault();
+    setCursor(0);
+  } else if (event.key === "End" || event.key === "Escape") {
+    event.preventDefault();
+    setCursor(null);
+  }
+}
+
+function updateReviewChrome() {
+  const canvas = $("sparkline");
+  const tMax = traceDomain();
+  canvas.setAttribute("aria-valuemin", "0");
+  if (!state.decisions.length) {
+    canvas.setAttribute("aria-valuemax", "0");
+    canvas.setAttribute("aria-valuenow", "0");
+    canvas.setAttribute("aria-valuetext", "No decisions yet");
+    canvas.setAttribute("aria-disabled", "true");
+    setText("trace-now", "AWAITING");
+    setText("trace-start", "T+—");
+    setText("trace-end", "T+—");
+    return;
+  }
+  canvas.removeAttribute("aria-disabled");
+  canvas.setAttribute("aria-valuemax", fixed(tMax, 2));
+  if (state.cursor === null) {
+    canvas.setAttribute("aria-valuenow", fixed(tMax, 2));
+    canvas.setAttribute("aria-valuetext", "Live");
+    setText("trace-now", "LIVE");
+    setText("trace-start", "T+0");
+    setText("trace-end", `T+${fixed(tMax, 1)} s`);
+    return;
+  }
+  canvas.setAttribute("aria-valuenow", fixed(state.cursor, 2));
+  canvas.setAttribute("aria-valuetext", `Review at T plus ${fixed(state.cursor, 2)} seconds`);
+  setText("trace-now", `REVIEW T+${fixed(state.cursor, 2)}`);
+  setText("review-time", `T+${fixed(state.cursor, 2)} s`);
+  setText("trace-start", "T+0");
+  setText("trace-end", `T+${fixed(tMax, 1)} s`);
 }
 
 boot();

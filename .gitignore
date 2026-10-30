@@ -29,3 +29,6 @@ artifacts/checkpoints/*
 # NOTE: artifacts/sam_cache/ and fixtures/ are deliberately NOT ignored.
 # The SAM cache must ship so `make bench` runs offline and byte-identically
 # for judges, and the fixtures are the only real signal in the project.
+
+# Design-taste working files (screenshots, measurements); not part of the app.
+.taste-skill/

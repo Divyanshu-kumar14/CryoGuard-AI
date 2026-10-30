@@ -4,161 +4,157 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="dark" />
-    <title>CryoGuard AI — Leak Safety Console</title>
+    <title>CryoGuard AI — rack safety console</title>
     <meta
       name="description"
       content="Observer console for the CryoGuard AI direct-to-chip leak detection pipeline. Synthetic fixtures; simulated PLC, BMC and NVML."
     />
+    <link rel="preload" href="/ui/fonts/public-sans-latin.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="stylesheet" href="/ui/styles.css" />
   </head>
   <body>
     <a class="skip-link" href="#console">Skip to console</a>
-    <div class="hazard-rail" aria-hidden="true"></div>
 
-    <header class="masthead">
+    <header class="topbar">
       <div class="brand">
-        <span class="brand-mark" aria-hidden="true">CG</span>
-        <div class="brand-text">
+        <span class="mark" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M12 2.6 4.4 6.9v10.2L12 21.4l7.6-4.3V6.9L12 2.6Z"/><path d="M12 8.2 8.2 10.4v4.4L12 17l3.8-2.2v-4.4L12 8.2Z"/></svg></span>
+        <span class="brand-text">
           <span class="wordmark">CryoGuard AI</span>
-          <span class="brand-sub">Direct-to-chip leak safety console</span>
-        </div>
-      </div>
-      <div class="masthead-meta">
-        <span class="rack-line">
-          <span class="rail-label">RACK</span>
-          <b id="rack-id">—</b>
-          <span class="rail-sep">/</span>
-          <span id="branch-id">—</span>
+          <span class="brand-sub">Rack safety console</span>
         </span>
+      </div>
+
+      <dl class="topmeta">
+        <div><dt>Branch</dt><dd id="branch-id">—</dd></div>
+        <div><dt>Config</dt><dd class="mono" id="config-hash" title="safety config hash">—</dd></div>
+        <div><dt>Fusion</dt><dd class="mono" id="fusion-hash" title="fusion freeze hash">—</dd></div>
+      </dl>
+
+      <div class="linkstate">
+        <span class="clock mono" id="clock" aria-hidden="true">--:--:--</span>
         <span class="chip" id="conn-chip" data-state="offline">
           <i class="dot" aria-hidden="true"></i>
           <span id="conn-text">WS OFFLINE</span>
         </span>
-        <span class="chip chip-quiet">
-          CONFIG <b id="config-hash">—</b>
-        </span>
-        <span class="chip chip-quiet">
-          FUSION <b id="fusion-hash">—</b>
-        </span>
       </div>
     </header>
 
-    <div class="sim-banner" id="sim-banner">
-      <span class="sim-stamp" id="sim-stamp">SIMULATED</span>
+    <div class="simstrip" id="sim-banner" data-source="synthetic">
+      <span class="stamp" id="sim-stamp">SIMULATED</span>
       <p id="sim-copy">
         Synthetic fixtures. Camera frames, telemetry, PLC, BMC and NVML are simulators.
-        No captured hardware is shown. The dashboard observes; it cannot actuate.
+        No captured hardware is shown.
       </p>
+      <span class="sim-rule">Observer only — no command path to hardware</span>
     </div>
 
-    <main id="console" class="console">
-      <div class="console-main">
-        <section class="panel viewport-panel" aria-labelledby="viewport-title">
-        <header class="panel-head">
-          <div>
-            <span class="eyebrow">Camera / rectified plane</span>
-            <h2 id="viewport-title">Chassis face — top-down</h2>
-          </div>
-          <div class="badge-row">
-            <span class="badge badge-sim" id="camera-badge">SIMULATED</span>
-            <span class="badge" id="camera-health" data-state="unknown">CAMERA —</span>
-          </div>
-        </header>
-        <div class="viewport-wrap">
-          <div class="canvas-stage">
-            <canvas
-              id="chassis"
-              width="1200"
-              height="800"
-              role="img"
-              aria-label="Rectified chassis plane. Waiting for a scenario run."
-            >
-              Your browser cannot render the chassis canvas. A text view of the zones and
-              candidate follows below.
-            </canvas>
-            <div class="viewport-hud" aria-hidden="true">
-              <span class="hud-chip">FRAME <b id="hud-frame">—</b></span>
-              <span class="hud-chip">T+ <b id="hud-time">—</b> s</span>
-              <span class="hud-chip">ZONE <b id="hud-zone">—</b></span>
-              <span class="hud-chip">AREA <b id="hud-area">—</b> mm²</span>
-            </div>
+    <main id="console" class="shell">
+      <div class="col-main">
+        <div class="titlerow">
+          <h1 id="rack-title">—</h1>
+          <p class="scope">Direct-to-chip loop · <span id="plane-size">—</span> · <span id="zone-list">—</span></p>
+          <div class="titlerow-end">
+            <span class="chip chip-quiet" id="sam-chip">SAM —</span>
+            <span class="chip chip-quiet" id="proto-chip">LOOPBACK</span>
+            <span class="runflag" id="runflag" data-state="idle">
+              <i aria-hidden="true"></i><span id="runflag-text">IDLE</span>
+            </span>
           </div>
         </div>
-        <div class="viewport-foot">
-          <span class="foot-note" id="viewport-source">SOURCE —</span>
-          <span class="foot-note">
-            ZONES <b id="zone-list">—</b>
-          </span>
-        </div>
-      </section>
 
-      <section class="panel timeline-panel" aria-labelledby="timeline-title">
-        <header class="panel-head">
-          <div>
-            <span class="eyebrow">Append-only audit log</span>
-            <h2 id="timeline-title">Action timeline</h2>
-          </div>
-          <div class="badge-row">
-            <span class="badge badge-quiet" id="timeline-count">0 STEPS</span>
-            <span class="badge badge-sim" id="plc-badge">PLC SIMULATED</span>
-            <span class="badge badge-sim" id="bmc-badge">BMC SIMULATED</span>
-          </div>
-        </header>
-        <ol class="timeline" id="timeline">
-          <li class="empty-state" id="timeline-empty">
-            No actuation yet. Steps appear here in execution order, with the readback
-            that accepted or rejected each one.
-          </li>
-        </ol>
-      </section>
-      </div>
+        <section class="stage" aria-labelledby="viewport-title">
+          <h2 class="visually-hidden" id="viewport-title">Chassis plane, rectified top-down</h2>
+          <canvas
+            id="chassis"
+            width="1200"
+            height="800"
+            role="img"
+            aria-label="Rectified chassis plane. Waiting for a scenario run."
+          >
+            Your browser cannot render the chassis canvas. The decision, telemetry and
+            action sequence are also printed as text beside it.
+          </canvas>
 
-      <div class="console-side">
-      <aside class="rail" aria-label="Decision and telemetry">
-        <section class="panel decision-panel" id="decision-panel" data-state="IDLE">
-          <header class="panel-head">
-            <div>
-              <span class="eyebrow">Fusion decision</span>
-              <h2>Leak probability</h2>
-            </div>
-            <span class="badge" id="decision-chip" data-state="idle">IDLE</span>
-          </header>
-          <div class="decision-main">
-            <div>
-              <span class="eyebrow">P(leak)</span>
-              <div class="p-value" id="p-leak">—</div>
-              <span class="p-sub" id="p-sub">awaiting event</span>
-            </div>
-            <div class="decision-state">
-              <span class="eyebrow">State</span>
-              <div class="state-label" id="state-label" aria-live="polite">IDLE</div>
-              <div class="rule-line">RULE <b id="rule-id">—</b></div>
-              <div class="rule-line">STREAK <b id="streak">—</b></div>
+          <div class="hud hud-tl">
+            <div class="hud-big mono" id="hud-time">T+ —</div>
+            <div class="hud-sub mono">FRAME <span id="hud-frame">—</span></div>
+          </div>
+
+          <div class="hud hud-tr">
+            <div class="hud-sub mono" id="hud-camera">CAMERA —</div>
+            <div class="hud-row">
+              <span class="hud-key">ZONE</span><span class="hud-val mono" id="hud-zone">—</span>
+              <span class="hud-key">AREA</span><span class="hud-val mono" id="hud-area">—</span><span class="hud-unit">mm²</span>
             </div>
           </div>
-          <div class="spark-wrap">
-            <canvas id="sparkline" width="640" height="180" aria-hidden="true"></canvas>
+
+          <div class="hud hud-bl">
+            <span class="badge" id="camera-badge">SIMULATED</span>
+            <span class="hud-sub mono" id="viewport-source">SOURCE —</span>
           </div>
-          <div class="thresholds" id="thresholds" aria-label="Configured decision thresholds"></div>
+
+          <div class="hud hud-br">
+            <div class="scalebar"><span id="scalebar-line"></span><span class="mono" id="scalebar-text">50 mm</span></div>
+            <div class="hud-sub mono" id="viewport-geom">1200 × 800 px · 2.0 px/mm</div>
+          </div>
+
+          <div class="review-flag" id="review-flag" hidden>
+            <span class="mono">REVIEW</span>
+            <b class="mono" id="review-time">T+ —</b>
+            <button type="button" class="ghost-button" id="review-exit">Back to live</button>
+          </div>
         </section>
 
-        <section class="panel report-panel" aria-labelledby="report-title">
-          <header class="panel-head">
-            <div>
-              <span class="eyebrow">Post-incident explanation</span>
-              <h2 id="report-title">Forensic report</h2>
-            </div>
-            <span class="badge badge-quiet" id="report-badge" data-source="none">
-              AWAITING INCIDENT
+        <section class="band" id="band" data-view="live" aria-label="Telemetry and incident report">
+          <div class="band-tabs" role="tablist" aria-label="Detail view">
+            <button type="button" role="tab" id="tab-live" aria-selected="true" aria-controls="pane-live" class="tab is-active">Telemetry</button>
+            <button type="button" role="tab" id="tab-report" aria-selected="false" aria-controls="pane-report" class="tab" disabled>Incident report</button>
+            <span class="band-meta">
+              <span class="badge" id="report-badge" data-source="none">AWAITING INCIDENT</span>
             </span>
-          </header>
-          <div class="report-body" id="report-body">
+          </div>
+
+          <div class="pane" id="pane-live" role="tabpanel" aria-labelledby="tab-live">
+            <div class="fusion" id="fusion">
+              <div class="cell">
+                <span class="cell-key">φ<sub>v</sub> visual</span>
+                <span class="cell-val mono" id="meter-v-value">—</span>
+                <span class="cell-track" aria-hidden="true"><span class="cell-fill" id="meter-v"></span></span>
+              </div>
+              <div class="cell">
+                <span class="cell-key">φ<sub>h</sub> hydraulic</span>
+                <span class="cell-val mono" id="meter-h-value">—</span>
+                <span class="cell-track" aria-hidden="true"><span class="cell-fill" id="meter-h"></span></span>
+              </div>
+              <div class="cell">
+                <span class="cell-key">φ<sub>t</sub> thermal</span>
+                <span class="cell-val mono" id="meter-t-value">—</span>
+                <span class="cell-track signed" aria-hidden="true"><span class="cell-fill signed" id="meter-t"></span></span>
+              </div>
+              <div class="cell">
+                <span class="cell-key">W wetness</span>
+                <span class="cell-val mono" id="meter-w-value">—</span>
+                <span class="cell-track" aria-hidden="true"><span class="cell-fill" id="meter-w"></span></span>
+              </div>
+            </div>
+
+            <dl class="readouts" id="readouts">
+              <div><dt>Pressure</dt><dd><b class="mono" id="t-pressure">—</b><span>psi</span></dd></div>
+              <div><dt>Pressure rate</dt><dd><b class="mono" id="t-rate">—</b><span>psi/s</span></dd></div>
+              <div><dt>Flow imbalance</dt><dd><b class="mono" id="t-flow">—</b><span>L/min</span></dd></div>
+              <div><dt>Surface</dt><dd><b class="mono" id="t-surface">—</b><span>°C</span></dd></div>
+              <div><dt>Dew point</dt><dd><b class="mono" id="t-dew">—</b><span>°C</span></dd></div>
+              <div><dt>Dew margin</dt><dd><b class="mono" id="t-margin">—</b><span>°C</span></dd></div>
+            </dl>
+          </div>
+
+          <div class="pane" id="pane-report" role="tabpanel" aria-labelledby="tab-report" hidden>
             <p class="empty-state" id="report-empty">
               No incident filed. The deterministic fallback is always available; the
               language model is asked only after the incident is sealed.
             </p>
-            <div class="report-content" id="report-content" hidden>
-              <div class="report-split">
+            <div class="report" id="report-content" hidden>
+              <div class="report-cols">
                 <div class="report-block">
                   <h3>Root cause</h3>
                   <p id="report-root-cause">—</p>
@@ -173,108 +169,110 @@
                 </div>
               </div>
               <dl class="report-meta">
-                <div><dt>Incident</dt><dd id="report-id">—</dd></div>
+                <div><dt>Incident</dt><dd class="mono" id="report-id">—</dd></div>
                 <div><dt>Origin</dt><dd id="report-origin">—</dd></div>
                 <div><dt>Evidence</dt><dd id="report-evidence">—</dd></div>
                 <div><dt>Source</dt><dd id="report-source">—</dd></div>
-                <div><dt>Timestamp</dt><dd id="report-time">—</dd></div>
-                <div><dt>Config</dt><dd id="report-config">—</dd></div>
+                <div><dt>Sealed</dt><dd class="mono" id="report-time">—</dd></div>
+                <div><dt>Model</dt><dd class="mono" id="report-model">—</dd></div>
               </dl>
             </div>
           </div>
         </section>
+      </div>
 
-        <section class="panel contributions" aria-labelledby="contrib-title">
-          <header class="panel-head">
-            <div>
-              <span class="eyebrow">Evidence contributions</span>
-              <h2 id="contrib-title">Fusion inputs</h2>
-            </div>
-            <span class="badge badge-quiet">LIVE</span>
+      <aside class="rail" aria-label="Decision, trace and actuation">
+        <section class="block decision" id="decision-panel" data-state="IDLE">
+          <header class="block-head">
+            <h2>Leak probability</h2>
+            <span class="state-mark" id="decision-chip" data-state="idle">IDLE</span>
           </header>
-          <div class="meters">
-            <div class="meter">
-              <span class="meter-label">φv visual</span>
-              <span class="meter-track"><span class="meter-fill" id="meter-v"></span></span>
-              <span class="meter-value" id="meter-v-value">—</span>
-            </div>
-            <div class="meter">
-              <span class="meter-label">φh hydraulic</span>
-              <span class="meter-track"><span class="meter-fill" id="meter-h"></span></span>
-              <span class="meter-value" id="meter-h-value">—</span>
-            </div>
-            <div class="meter">
-              <span class="meter-label">φt thermal</span>
-              <span class="meter-track signed"><span class="meter-fill signed" id="meter-t"></span></span>
-              <span class="meter-value" id="meter-t-value">—</span>
-            </div>
-            <div class="meter">
-              <span class="meter-label">W wetness</span>
-              <span class="meter-track"><span class="meter-fill" id="meter-w"></span></span>
-              <span class="meter-value" id="meter-w-value">—</span>
+          <div class="decision-main">
+            <div class="p-value mono" id="p-leak" aria-live="off">—</div>
+            <div class="decision-side">
+              <div class="state-label" id="state-label" aria-live="polite">IDLE</div>
+              <div class="decision-meta">
+                <span>RULE <b class="mono" id="rule-id">—</b></span>
+                <span>STREAK <b class="mono" id="streak">—</b></span>
+              </div>
+              <div class="p-sub" id="p-sub">awaiting event</div>
             </div>
           </div>
         </section>
 
-        <section class="panel telemetry" aria-labelledby="telemetry-title">
-          <header class="panel-head">
-            <div>
-              <span class="eyebrow">Loop / environment</span>
-              <h2 id="telemetry-title">Telemetry</h2>
-            </div>
-            <span class="badge badge-sim" id="telemetry-badge">SIMULATED</span>
+        <section class="block trace" aria-labelledby="trace-title">
+          <header class="block-head">
+            <h2 id="trace-title">P(leak) over time</h2>
+            <span class="trace-hint mono" id="trace-hint">drag to rewind</span>
           </header>
-          <dl class="telemetry-grid">
-            <div>
-              <dt>Pressure rate</dt>
-              <dd><b id="t-rate">—</b> <span>psi/s</span></dd>
-            </div>
-            <div>
-              <dt>Dew margin</dt>
-              <dd><b id="t-margin">—</b> <span>°C</span></dd>
-            </div>
-            <div>
-              <dt>Pressure</dt>
-              <dd><b id="t-pressure">—</b> <span>psi</span></dd>
-            </div>
-            <div>
-              <dt>Flow imbalance</dt>
-              <dd><b id="t-flow">—</b> <span>L/min</span></dd>
-            </div>
-            <div>
-              <dt>Surface</dt>
-              <dd><b id="t-surface">—</b> <span>°C</span></dd>
-            </div>
-            <div>
-              <dt>Dew point</dt>
-              <dd><b id="t-dew">—</b> <span>°C</span></dd>
-            </div>
-          </dl>
+          <div class="trace-wrap">
+            <canvas
+              id="sparkline"
+              width="640"
+              height="190"
+              role="slider"
+              tabindex="0"
+              aria-label="Rewind the incident: P(leak) over elapsed time"
+              aria-valuemin="0"
+              aria-valuemax="1"
+              aria-valuenow="1"
+              aria-valuetext="Live"
+            ></canvas>
+          </div>
+          <div class="trace-foot mono">
+            <span id="trace-start">T+0.0</span>
+            <span id="trace-now">LIVE</span>
+            <span id="trace-end">T+0.0 s</span>
+          </div>
+        </section>
+
+        <section class="block thresholds" aria-labelledby="thresh-title">
+          <header class="block-head">
+            <h2 id="thresh-title">Decision bands</h2>
+            <span class="block-meta mono">from configs/default.yaml</span>
+          </header>
+          <div class="bands" id="thresholds" aria-label="Configured decision thresholds"></div>
+        </section>
+
+        <section class="block sequence" aria-labelledby="sequence-title">
+          <header class="block-head">
+            <h2 id="sequence-title">Actuation sequence</h2>
+            <span class="block-meta mono" id="timeline-count">0 steps</span>
+          </header>
+          <ol class="ladder" id="timeline">
+            <li class="empty-state" id="timeline-empty">
+              No actuation yet. Steps appear here in execution order, with the readback
+              that accepted or rejected each one.
+            </li>
+          </ol>
+          <p class="ladder-note" id="ladder-note" hidden>
+            <span class="badge" id="plc-badge">PLC SIMULATED</span>
+            <span class="badge" id="bmc-badge">BMC SIMULATED</span>
+            <span class="badge" id="telemetry-badge">TELEMETRY SIMULATED</span>
+          </p>
         </section>
       </aside>
-
-
-      </div>
     </main>
 
-    <footer class="command-bar">
-      <div class="scenario-picker" id="scenario-picker" role="group" aria-label="Scenario">
-        <span class="picker-label">SCENARIO</span>
+    <footer class="cmdbar">
+      <div class="scenarios" role="group" aria-label="Scenario">
+        <span class="cmd-key">Scenario</span>
         <div class="scenario-buttons" id="scenario-buttons"></div>
       </div>
-      <div class="command-actions">
-        <button type="button" class="run-button" id="run-button" disabled>
-          RUN SIMULATION
-        </button>
+      <div class="cmd-actions">
         <span class="run-status" id="run-status" data-state="idle" aria-live="polite">IDLE</span>
+        <button type="button" class="run-button" id="run-button" disabled>
+          Run scenario
+          <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true" fill="currentColor"><path d="M4 2.8v10.4L13 8 4 2.8Z"/></svg>
+        </button>
       </div>
     </footer>
 
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
     <noscript>
       <p class="noscript">
-        This console is an event-stream client and needs JavaScript enabled. The
-        pipeline itself runs headless with <code>make demo</code>.
+        This console is an event-stream client and needs JavaScript enabled. The pipeline
+        itself runs headless with <code>make demo</code>.
       </p>
     </noscript>
     <script type="module" src="/ui/app.js"></script>

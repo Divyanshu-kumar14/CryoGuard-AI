@@ -69,7 +69,8 @@ def test_the_manifest_and_the_zero_build_ui_are_served(app) -> None:
     assert javascript.status_code == 200
     assert "RUN_STARTED" in javascript.text
     assert stylesheet.status_code == 200
-    assert "--aqua" in stylesheet.text
+    assert "--accent" in stylesheet.text
+    assert "/ui/fonts/" in stylesheet.text
 
 
 def test_a_run_streams_in_order_and_files_a_readable_incident(app) -> None:
@@ -107,6 +108,51 @@ def test_a_run_streams_in_order_and_files_a_readable_incident(app) -> None:
         assert incident.status_code == 200
         assert incident.json()["incidentId"] == state["run"]["incident_id"]
         assert incident.json()["reportSource"] == "deterministic_fallback"
+
+
+def test_the_state_endpoint_carries_the_history_the_rewind_scrubber_replays(app) -> None:
+    """The console rewinds by folding this list, so it must be the whole run.
+
+    /ws replays the same events from the bus; the UI de-duplicates by ``seq``.
+    If the snapshot were folded to the latest value only, the scrubber would
+    have nothing to travel through and would have to invent a past.
+    """
+
+    with TestClient(app) as client:
+        idle = client.get("/api/state").json()
+        assert idle["history"] == []
+
+        with client.websocket_connect("/ws") as socket:
+            assert (
+                client.post(
+                    "/api/run",
+                    json={"scenario": "leak", "protocols": "memory", "sam": "off"},
+                ).status_code
+                == 202
+            )
+            streamed = []
+            for _ in range(600):
+                event = socket.receive_json()
+                if event["type"] == "HEARTBEAT":
+                    continue
+                streamed.append(event)
+                if event["type"] == "RUN_FINISHED":
+                    break
+            else:  # pragma: no cover - the run is deterministic
+                pytest.fail("the run never finished")
+
+        state = client.get("/api/state").json()
+
+    history = state["history"]
+    assert [event["seq"] for event in history] == list(range(1, len(history) + 1))
+    assert [event["type"] for event in history] == [event["type"] for event in streamed]
+    assert history[0]["type"] == "RUN_STARTED"
+    assert history[-1]["type"] == "RUN_FINISHED"
+    assert sum(event["type"] == "DECISION_CHANGE" for event in history) == 75
+    assert sum(event["type"] == "ACTION_EXECUTED" for event in history) == 6
+    # Every frame the scrubber can land on keeps its geometry and camera health.
+    frame = next(event for event in history if event["type"] == "FRAME_TICK")
+    assert {"frame", "contours", "candidate", "camera"} <= set(frame["data"])
 
 
 def test_a_second_run_is_refused_while_one_is_running(app) -> None:
