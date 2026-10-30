@@ -11,7 +11,9 @@ make serve SCENARIO=           # start idle; choose a scenario in the UI
 ```
 
 `make serve` starts `src/cryoguard/server.py` with the settings in
-`configs/dashboard.yaml` (loopback bind, port 8080). The default run uses
+`configs/dashboard.yaml` (loopback bind, port 8080). It loads `.env` if present,
+so a live SAM or Muse key can be supplied there without exporting it; `make
+env-check` reports presence without printing values. The default run uses
 `protocol_mode: loopback` (real Modbus-TCP and Redfish clients against the
 SIMULATED servers) and SAM `cache` (the committed fixture cache, no network).
 

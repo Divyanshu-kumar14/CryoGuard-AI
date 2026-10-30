@@ -5,11 +5,15 @@ MYPY := .venv/bin/mypy
 SCENARIO ?= leak
 SPLIT ?= all
 
-.PHONY: setup lint format typecheck test check export fixtures probe serve demo sims bench bench-check seed-sam checkpoints
+.PHONY: setup lint format typecheck test check export fixtures probe serve demo sims bench bench-check seed-sam checkpoints env-check
 
 ## Create the pinned environment from uv.lock. uv owns the venv; .python-version pins 3.11.
 setup:
 	uv sync --all-extras --frozen
+
+## Show which credentials are present without printing any value.
+env-check:
+	PYTHONPATH=src $(PY) -m cryoguard.env
 
 ## Match CI exactly: no autofix, no reformat.
 lint:

@@ -142,5 +142,9 @@ the benchmark. A config change deliberately invalidates old incident artifacts.
 Dashboard runtime settings are in `configs/dashboard.yaml`, separate so a port
 change cannot invalidate the safety freeze.
 
-Secrets are environment-only: `META_API_KEY` for SAM, `MUSE_API_KEY` for the
-report model, optional `CRYOGUARD_BMC_TOKEN`. No secret is committed.
+Secrets are local-only. Copy `.env.example` to `.env` and fill only the keys you
+are using: `META_API_KEY` for live SAM, `MUSE_API_KEY` for the report model, and
+optional `CRYOGUARD_BMC_TOKEN` for a real Redfish BMC. `.env` is gitignored;
+`make demo` and `make serve` load it automatically, and the process environment
+wins over the file. `make env-check` prints presence, never a value. No secret is
+committed, and the library/tests/benchmark never load `.env`.

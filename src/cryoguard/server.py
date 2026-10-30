@@ -39,6 +39,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from cryoguard.config import config_hash, get, load
+from cryoguard.env import load_env
 from cryoguard.events import EventBus, PipelineEvent, Subscription
 from cryoguard.pipeline import SCENARIOS, resolve_scenario, run_scenario
 
@@ -547,6 +548,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--sam", choices=("off", "cache", "live"), default=None)
     args = parser.parse_args(argv)
+    load_env()
 
     settings = load_settings()
     if args.protocols:

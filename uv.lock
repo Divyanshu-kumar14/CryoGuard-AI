@@ -72,6 +72,7 @@ dependencies = [
     { name = "opencv-contrib-python" },
     { name = "pydantic" },
     { name = "pymodbus" },
+    { name = "python-dotenv" },
     { name = "pyyaml" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -100,6 +101,7 @@ requires-dist = [
     { name = "pydantic", specifier = "==2.14.2" },
     { name = "pymodbus", specifier = "==3.11.4" },
     { name = "pytest", marker = "extra == 'dev'", specifier = "==9.2.0" },
+    { name = "python-dotenv", specifier = "==1.2.4" },
     { name = "pyyaml", specifier = "==6.0.3" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.17.3" },
     { name = "types-pyyaml", marker = "extra == 'dev'" },

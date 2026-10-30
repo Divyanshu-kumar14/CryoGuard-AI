@@ -10,6 +10,7 @@ from pathlib import Path
 import yaml
 
 from cryoguard.config import load
+from cryoguard.env import load_env
 from cryoguard.pipeline import run_scenario
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -44,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+    load_env()
 
     if not args.headless:
         print(

@@ -69,13 +69,16 @@ key is available in this environment.
 ## Enabling a live call
 
 ```bash
-export MUSE_API_KEY=...          # never in the repository
+cp .env.example .env             # .env is gitignored
+# edit .env: MUSE_API_KEY=...    # never commit or paste the value into chat
+make env-check                   # prints present/absent, never the value
 make demo SCENARIO=leak
 ```
 
-The incident then carries `reportSource: llm` and the proof log has an `ok`
-line. If the key is absent the same command prints
-`report    deterministic_fallback`.
+`make demo` and `make serve` load `.env` automatically; a real process
+environment variable wins over the file. The incident then carries
+`reportSource: llm` and the proof log has an `ok` line. If the key is absent the
+same command prints `report    deterministic_fallback`.
 
 ## Tests
 
