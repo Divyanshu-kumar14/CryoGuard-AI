@@ -8,6 +8,11 @@ Muse client is disabled for the run.
 The manifest split is shown per clip; the headline metrics are computed for the
 requested split *and* for every clip. The split policy is provisional (two clips
 per side), so hiding the other half would be worse than showing n=2.
+
+Localization is geometric, not a string match: the candidate centroid in
+rectified chassis millimetres is compared with the centre of the configured QD
+ROI, and the Euclidean error must fall inside the fitting radius. A reported
+origin that merely names "QD-04" is not evidence that the leak was found there.
 """
 
 from __future__ import annotations
@@ -15,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import socket
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -28,6 +34,7 @@ from cryoguard.pipeline import RunResult, run_scenario
 
 ROOT = Path(__file__).resolve().parents[3]
 POSITIVE_LABELS = {"CONFIRMED_LEAK", "EMERGENCY_TRIP", "HIDDEN_HYDRAULIC_EVENT"}
+FITTING_RADIUS_MM = 25.0
 
 
 class BenchError(RuntimeError):
@@ -57,7 +64,8 @@ class ClipRun:
     p: float
     expected_qd: str
     suspected_origin: str
-    localized: bool | None
+    localized_within_tolerance: bool | None
+    localization_error_mm: float | None
     localizable: bool
     zone: int | None
     expected_zone: int
@@ -82,7 +90,12 @@ class ClipRun:
             "p": self.p,
             "expectedQd": self.expected_qd,
             "suspectedOrigin": self.suspected_origin,
-            "localized": self.localized,
+            "localizationErrorMm": (
+                None
+                if self.localization_error_mm is None
+                else round(float(self.localization_error_mm), 2)
+            ),
+            "localizedWithinTolerance": self.localized_within_tolerance,
             "localizable": self.localizable,
             "zone": self.zone,
             "expectedZone": self.expected_zone,
@@ -94,6 +107,16 @@ class ClipRun:
             "checkpointCommitted": self.checkpoint_committed,
             "sequenceState": self.sequence_state,
         }
+
+
+def qd_centroid_mm(topology: dict[str, Any], qd_id: str) -> tuple[float, float] | None:
+    """Centre of a configured QD ROI, in chassis millimetres."""
+
+    for qd in topology.get("qd", []):
+        if str(qd.get("id")) == qd_id:
+            x0, y0, x1, y1 = (float(value) for value in qd["roi_mm"])
+            return ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+    return None
 
 
 @contextmanager
@@ -144,7 +167,7 @@ def select_clips(manifest: dict[str, Any], split: str) -> list[dict[str, Any]]:
     return selected
 
 
-def _row(clip: dict[str, Any], result: RunResult) -> ClipRun:
+def _row(clip: dict[str, Any], result: RunResult, topology: dict[str, Any]) -> ClipRun:
     report = result.report
     decision = result.decision
     actions = report.deterministic_actions_taken if report is not None else []
@@ -152,8 +175,18 @@ def _row(clip: dict[str, Any], result: RunResult) -> ClipRun:
     origin = report.suspected_origin if report is not None else ""
     zone = report.physical_evidence.zone if report is not None else None
 
-    localizable = bool(report is not None and zone is not None and expected_qd)
-    localized = (expected_qd in origin and zone is not None) if localizable else None
+    true_centroid = qd_centroid_mm(topology, expected_qd) if expected_qd else None
+    predicted_centroid = result.centroid_mm
+    localizable = bool(
+        report is not None and predicted_centroid is not None and true_centroid is not None
+    )
+    error_mm: float | None = None
+    if localizable and predicted_centroid is not None and true_centroid is not None:
+        error_mm = math.hypot(
+            predicted_centroid[0] - true_centroid[0],
+            predicted_centroid[1] - true_centroid[1],
+        )
+    localized = None if error_mm is None else error_mm <= FITTING_RADIUS_MM
     valve_actions = [action for action in actions if action.command == "VALVE_CLOSE"]
     checkpoint_actions = [action for action in actions if action.command == "CHECKPOINT_VERIFY"]
 
@@ -177,7 +210,8 @@ def _row(clip: dict[str, Any], result: RunResult) -> ClipRun:
         else (float(decision.p) if decision is not None else 0.0),
         expected_qd=expected_qd,
         suspected_origin=origin,
-        localized=localized,
+        localized_within_tolerance=localized,
+        localization_error_mm=error_mm,
         localizable=localizable,
         zone=zone,
         expected_zone=int(clip.get("expected_zone", -1)),
@@ -221,7 +255,7 @@ def run_clip(
             allow_llm=False,
         )
     )
-    return BenchRun(row=_row(clip, result), result=result)
+    return BenchRun(row=_row(clip, result, topology), result=result)
 
 
 def run_benchmark(

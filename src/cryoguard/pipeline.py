@@ -146,6 +146,10 @@ class RunResult:
     protocol_mode: str = "memory"
     sequence_state: IncidentState | None = None
     timing: TimingSamples = TimingSamples()
+    # Candidate centroid in rectified chassis millimetres at decision time. The
+    # benchmark turns it into a geometric localization error; None when no
+    # candidate was localised (e.g. a hydraulic-only incident).
+    centroid_mm: tuple[float, float] | None = None
 
 
 def resolve_scenario(name: str) -> str:
@@ -582,6 +586,8 @@ async def run_scenario(
             sensor,
             limit_c=float(get(cfg, "thermal_model.watchdog_limit_c")),
             period_s=float(get(cfg, "watchdog.period_ms")) / 1000.0,
+            max_staleness_ms=float(get(cfg, "watchdog.max_staleness_ms")),
+            max_frozen_ticks=int(get(cfg, "watchdog.max_frozen_ticks")),
             actuate=actuate,
         )
         watchdog_task = asyncio.create_task(watchdog.run(watchdog_stop))
@@ -1041,4 +1047,9 @@ async def _finish(
         protocol_mode=protocol_mode,
         sequence_state=sequence_state,
         timing=timing,
+        centroid_mm=(
+            (float(candidate.centroid_mm[0]), float(candidate.centroid_mm[1]))
+            if candidate is not None
+            else None
+        ),
     )

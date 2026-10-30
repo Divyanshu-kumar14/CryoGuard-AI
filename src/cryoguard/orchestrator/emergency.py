@@ -6,8 +6,9 @@ because the trigger is a hardware condition rather than a measured leak with a
 usable checkpoint. It never claims an isolation it did not verify.
 
 Order: valve close (spring-return), scheduler cordon (reversible), power cut.
-A valve ``FAULT`` still cuts power and ends ``HARD_TRIP``; if the cut also fails
-the result is ``FAILED_SAFE``, never an optimistic ``EMERGENCY_TRIP``.
+A valve ``FAULT`` or a ``VALVE_SEAL_LEAK`` (stem closed, line still pressurized)
+still cuts power and ends ``HARD_TRIP``; if the cut also fails the result is
+``FAILED_SAFE``, never an optimistic ``EMERGENCY_TRIP``.
 """
 
 from __future__ import annotations
@@ -50,7 +51,8 @@ class EmergencySequence:
         detail = f"{reason}; PowerState={power.state} ({source} BMC)"
         if power.detail:
             detail = f"{detail}; {power.detail}"
-        self._record("BMC", "FORCE_OFF", "ACCEPTED" if power.ok else "REJECTED", detail)
+        status = power.status or ("ACCEPTED" if power.ok else "REJECTED")
+        self._record("BMC", "FORCE_OFF", status, detail)
         return power
 
     def _cordon(self) -> None:
@@ -69,6 +71,8 @@ class EmergencySequence:
                 valve_status = "LIMIT_SWITCH_CLOSED_SLOW"
             elif valve.status is ValveStatus.FAULT:
                 valve_status = "FAULT"
+            elif valve.status is ValveStatus.VALVE_SEAL_LEAK:
+                valve_status = "VALVE_SEAL_LEAK"
             else:
                 valve_status = "LIMIT_SWITCH_CLOSED"
             self._record(
@@ -77,7 +81,7 @@ class EmergencySequence:
                 valve_status,
                 valve.detail or f"limit switch; band {valve.status.value}",
             )
-            if valve.status is not ValveStatus.FAULT:
+            if valve.status in (ValveStatus.VERIFIED, ValveStatus.VERIFIED_SLOW):
                 # Scenario time, not measured wall time: the incident stays reproducible.
                 self.clock.advance((valve.nominal_ms or valve.travel_ms) / 1000.0)
 
@@ -86,7 +90,7 @@ class EmergencySequence:
 
             if not power.ok:
                 return EmergencyResult(IncidentState.FAILED_SAFE, self.log.snapshot())
-            if valve.status is ValveStatus.FAULT:
+            if valve.status not in (ValveStatus.VERIFIED, ValveStatus.VERIFIED_SLOW):
                 return EmergencyResult(IncidentState.HARD_TRIP, self.log.snapshot())
             return EmergencyResult(IncidentState.EMERGENCY_TRIP, self.log.snapshot())
         finally:

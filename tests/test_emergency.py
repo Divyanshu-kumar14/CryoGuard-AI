@@ -29,11 +29,10 @@ def cfg() -> dict:
     return load(ROOT / "configs" / "default.yaml")
 
 
-def _sequence(cfg: dict, *, bmc_fail: bool = False, plc_fault: bool = False):
+def _sequence(cfg: dict, *, bmc_fail: bool = False, plc_status: ValveStatus = ValveStatus.VERIFIED):
     clock = ScenarioClock(10.0)
     plc = SimulatedPlc(950.0)
-    if plc_fault:
-        plc.status = ValveStatus.FAULT
+    plc.status = plc_status
     return EmergencySequence(
         clock,
         plc,
@@ -64,7 +63,7 @@ def test_the_emergency_path_isolates_cordons_and_cuts_power(cfg) -> None:
 
 
 def test_a_failed_valve_still_cuts_power_and_reports_a_hard_trip(cfg) -> None:
-    result = _sequence(cfg, plc_fault=True).run("junction 96.4 C")
+    result = _sequence(cfg, plc_status=ValveStatus.FAULT).run("junction 96.4 C")
 
     assert result.state is IncidentState.HARD_TRIP
     assert result.steps[0].status == "FAULT"
@@ -73,10 +72,22 @@ def test_a_failed_valve_still_cuts_power_and_reports_a_hard_trip(cfg) -> None:
 
 
 def test_a_failed_valve_and_a_failed_power_cut_is_failed_safe(cfg) -> None:
-    result = _sequence(cfg, plc_fault=True, bmc_fail=True).run("junction 96.4 C")
+    result = _sequence(cfg, plc_status=ValveStatus.FAULT, bmc_fail=True).run("junction 96.4 C")
 
     assert result.state is IncidentState.FAILED_SAFE
     assert result.steps[-1].status == "REJECTED"
+
+
+def test_a_seal_leak_still_cuts_power_and_reports_a_hard_trip(cfg) -> None:
+    """Emergency path: a closed stem over a pressurized line is not a safe trip."""
+
+    result = _sequence(cfg, plc_status=ValveStatus.VALVE_SEAL_LEAK).run("junction 96.4 C")
+
+    assert result.state is IncidentState.HARD_TRIP
+    assert result.steps[0].status == "VALVE_SEAL_LEAK"
+    assert result.steps[1].ts == 10.0  # no travel advance: isolation was never claimed
+    assert result.steps[-1].command == "FORCE_OFF"
+    assert result.steps[-1].status == "ACCEPTED"
 
 
 def test_a_good_isolation_with_a_failed_power_cut_is_failed_safe(cfg) -> None:

@@ -44,7 +44,8 @@ def _row(
         p=p,
         expected_qd="QD-04",
         suspected_origin="QD-04 (Zone 0)",
-        localized=localized,
+        localized_within_tolerance=localized,
+        localization_error_mm=None if localized is None else (0.8 if localized else 40.0),
         localizable=localizable,
         zone=zone,
         expected_zone=0,
@@ -113,6 +114,50 @@ def test_the_payload_has_the_required_digests_and_metrics() -> None:
     assert data["headline"]["falsePositiveRate"]["display"] == "0.0% (0/1)"
     assert data["metrics"]["all"]["tp"] == 1
     assert data["metrics"]["test"]["tn"] == 1
+
+
+def test_the_report_is_framed_as_a_scenario_verification_suite() -> None:
+    data = payload()
+    rendered = render_markdown(data)
+
+    assert data["title"] == (
+        "Deterministic Regression & Safety Verification Suite (4 Physical Scenarios)"
+    )
+    assert rendered.startswith(
+        "# Deterministic Regression & Safety Verification Suite (4 Physical Scenarios)"
+    )
+    assert data["verification"]["display"] == (
+        "Automated Scenario Verification: 2/2 passing "
+        "(1 positive detection scenario, 1 negative control scenario)"
+    )
+    assert data["verification"]["display"] in rendered
+    assert data["verification"]["passed"] == 2
+    assert data["verification"]["total"] == 2
+    assert "100% Recall" not in rendered
+
+
+def test_the_sample_size_notice_sits_next_to_the_confidence_intervals() -> None:
+    data = payload()
+    rendered = render_markdown(data)
+
+    assert data["notice"].startswith("Notice: Sample size n=4")
+    assert "Clopper-Pearson" in rendered
+    assert "Notice: Sample size n=4" in rendered
+    # The notice follows the headline table, where the CI and counts live.
+    assert rendered.index("Clopper-Pearson") < rendered.index("Notice: Sample size n=4")
+
+
+def test_localization_reports_the_geometric_error_and_tolerance() -> None:
+    data = payload()
+    rendered = render_markdown(data)
+
+    assert data["localizationToleranceMm"] == 25.0
+    assert data["localization"]["meanErrorMm"] == pytest.approx(0.8)
+    assert data["localization"]["meanErrorDisplay"] == "0.8 mm"
+    assert data["localization"]["display"] == "100.0% (1/1)"
+    assert data["clips"][0]["localizationErrorMm"] == pytest.approx(0.8)
+    assert data["clips"][0]["localizedWithinTolerance"] is True
+    assert "Loc. error (mm)" in rendered
 
 
 def test_the_markdown_is_a_pure_function_of_the_json() -> None:

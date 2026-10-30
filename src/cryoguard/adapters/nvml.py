@@ -22,18 +22,36 @@ class NvmlError(ValueError):
 class FakeNvml:
     """SIMULATED backend. The floor comes from config, not from a hard-coded watt."""
 
-    def __init__(self, min_limit_w: float, *, fail: bool = False, junction_c: float = 40.0) -> None:
+    def __init__(
+        self,
+        min_limit_w: float,
+        *,
+        fail: bool = False,
+        junction_c: float = 40.0,
+        loaded: bool = False,
+    ) -> None:
         if min_limit_w <= 0:
             raise NvmlError(f"min_limit_w must be positive: {min_limit_w}")
         self.min_limit_w = float(min_limit_w)
         self.fail = fail
         self._junction_c = float(junction_c)
+        self.loaded = bool(loaded)
         self.calls = 0
 
     def junction_c(self) -> float:
         """SIMULATED junction temperature; the watchdog treats it as measured."""
 
         return self._junction_c
+
+    def under_load(self) -> bool:
+        """SIMULATED load flag.
+
+        A fixed junction is not a live thermal trace, so an unconfigured fake
+        reports idle and never arms the watchdog's freeze detector. A test that
+        wants a loaded GPU passes ``loaded=True`` and scripts the readings.
+        """
+
+        return self.loaded
 
     def clamp(self) -> ClampResult:
         self.calls += 1
@@ -75,6 +93,33 @@ class RealNvml:
             initialized = True
             handle = pynvml.nvmlDeviceGetHandleByIndex(self.device_index)
             return float(pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU))
+        except Exception as exc:  # NVML raises its own exception type
+            raise NvmlError(f"NVML error: {type(exc).__name__}: {exc}") from exc
+        finally:
+            if initialized:
+                try:
+                    pynvml.nvmlShutdown()
+                except Exception:
+                    pass
+
+    def under_load(self) -> bool:
+        """True when the GPU reports non-zero utilization.
+
+        The watchdog only treats a byte-identical junction trace as frozen while
+        the device is doing work; an idle GPU holds a constant temperature.
+        """
+
+        try:
+            pynvml: Any = import_module("pynvml")
+        except ImportError as exc:
+            raise NvmlError("pynvml is not installed") from exc
+
+        initialized = False
+        try:
+            pynvml.nvmlInit()
+            initialized = True
+            handle = pynvml.nvmlDeviceGetHandleByIndex(self.device_index)
+            return int(pynvml.nvmlDeviceGetUtilizationRates(handle).gpu) > 0
         except Exception as exc:  # NVML raises its own exception type
             raise NvmlError(f"NVML error: {type(exc).__name__}: {exc}") from exc
         finally:

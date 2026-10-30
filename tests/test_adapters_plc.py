@@ -41,6 +41,16 @@ async def _close_with_travel(cfg: dict, travel_ms: float | None):
         return result, reading
 
 
+async def _close_with_seal_leak(cfg: dict, psi: float = 32.0):
+    async with loopback_simulators(cfg, plc_seal_leak_psi=psi) as endpoints:
+        # Short timeout: the pressure never drops, so the wait is pure test time.
+        section = dict(cfg["plc"], depressurize_timeout_ms=100)
+        client = PlcClient(section, host=endpoints.plc_host, port=endpoints.plc_port)
+        result = await asyncio.to_thread(client.close_valve)
+        reading = await asyncio.to_thread(client.read)
+        return result, reading
+
+
 def test_the_register_map_decodes_ints_not_floats(cfg) -> None:
     reading = asyncio.run(_read_initial(cfg))
 
@@ -58,10 +68,25 @@ def test_a_950_ms_close_is_verified(cfg) -> None:
     assert result.status is ValveStatus.VERIFIED
     assert result.nominal_ms == pytest.approx(cfg["plc"]["valve_travel_ms"])
     assert result.travel_ms > 0
+    assert "line depressurized" in result.detail
     assert reading.limit_closed is True
     assert reading.fault is False
     assert reading.pressure_psi == 0.0
     assert reading.flow_lpm == 0.0
+
+
+def test_a_closed_limit_switch_with_line_pressure_is_a_seal_leak(cfg) -> None:
+    """The limit switch proves the stem moved; it does not prove isolation."""
+
+    result, reading = asyncio.run(_close_with_seal_leak(cfg))
+
+    assert result.status is ValveStatus.VALVE_SEAL_LEAK
+    assert result.status is not ValveStatus.VERIFIED
+    assert result.travel_ms > 0
+    assert reading.limit_closed is True
+    assert reading.depressurized is False
+    assert reading.pressure_psi == pytest.approx(32.0)
+    assert "32.0 PSI" in result.detail
 
 
 def test_a_1300_ms_close_is_verified_slow(cfg) -> None:

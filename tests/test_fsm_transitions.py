@@ -198,6 +198,51 @@ def test_a_valve_fault_with_a_failed_power_cut_is_failed_safe() -> None:
     assert orch.steps[-1].status == "REJECTED"
 
 
+def test_a_verified_close_with_a_depressurized_line_reaches_isolated() -> None:
+    """VERIFIED is only emitted after stem closure *and* depressurization."""
+
+    clock = FakeClock()
+    orch, _, _, _, _ = build(clock)
+    fsm = orch.run()
+
+    assert fsm.state is IncidentState.RESOLVED_PENDING_REPAIR
+    assert "valve_closed" in [name for name, _ in fsm.events]
+    valve_step = next(step for step in orch.steps if step.command == "VALVE_CLOSE")
+    assert valve_step.status == "LIMIT_SWITCH_CLOSED"
+
+
+def test_a_seal_leak_hard_trips_and_cuts_power() -> None:
+    """A closed stem over a still-pressurized line is not isolation."""
+
+    clock = FakeClock()
+    orch, calls, _, _, _ = build(clock, valve=ValveStatus.VALVE_SEAL_LEAK)
+    fsm = orch.run()
+
+    assert fsm.state is IncidentState.HARD_TRIP
+    assert calls == ["checkpoint", "clamp", "valve", "drain", "bmc"]
+    assert "valve_closed" not in [name for name, _ in fsm.events]
+    assert [step.command for step in orch.steps] == [
+        "CLAMP",
+        "VALVE_CLOSE",
+        "SCHEDULER_DRAIN",
+        "FORCE_OFF",
+    ]
+    assert orch.steps[1].status == "VALVE_SEAL_LEAK"
+    assert orch.steps[-1].status == "ACCEPTED"
+    assert "seal leak" in orch.steps[-1].detail
+
+
+def test_a_seal_leak_with_a_failed_power_cut_is_failed_safe() -> None:
+    clock = FakeClock()
+    orch, _, _, _, _ = build(clock, valve=ValveStatus.VALVE_SEAL_LEAK, bmc_ok=False)
+    fsm = orch.run()
+
+    assert fsm.state is IncidentState.FAILED_SAFE
+    assert "valve_closed" not in [name for name, _ in fsm.events]
+    assert orch.steps[-1].command == "FORCE_OFF"
+    assert orch.steps[-1].status == "REJECTED"
+
+
 def test_a_slow_valve_still_isolates_and_is_reported_as_slow() -> None:
     clock = FakeClock()
     orch, _, _, _, _ = build(clock, valve=ValveStatus.VERIFIED_SLOW)

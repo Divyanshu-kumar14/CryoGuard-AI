@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import httpx
 import pytest
 
 from cryoguard.adapters.loopback import loopback_simulators
@@ -21,6 +22,8 @@ from cryoguard.config import load
 from cryoguard.models import IncidentState
 from cryoguard.orchestrator.adapters import ScenarioClock, SimulatedBmc
 from cryoguard.orchestrator.incident_fsm import (
+    VERIFICATION_TIMEOUT,
+    VERIFIED_OFF,
     ConfirmedLeakOrchestrator,
     IncidentFSM,
     SequenceStep,
@@ -35,6 +38,17 @@ def cfg() -> dict:
     return load(ROOT / "configs" / "default.yaml")
 
 
+def _power_body(power: str) -> dict:
+    return {"PowerState": power, "Oem": {"CryoGuard": {"simulated": True}}}
+
+
+def _redfish_202(cfg: dict, handler, **overrides) -> RedfishClient:
+    """The real client over a transport that answers 202, without a socket."""
+
+    section = dict(cfg["bmc"], **overrides)
+    return RedfishClient(section, client=httpx.Client(transport=httpx.MockTransport(handler)))
+
+
 async def _run(
     cfg: dict,
     checkpoint_dir: Path,
@@ -42,6 +56,7 @@ async def _run(
     clamp_ok: bool = True,
     plc_travel_ms: float | None = None,
     failing_bmc: bool = False,
+    bmc_factory=None,
 ) -> tuple[IncidentFSM, list[SequenceStep], PlcReading, str, dict]:
     async with loopback_simulators(cfg, plc_travel_ms=plc_travel_ms) as endpoints:
 
@@ -57,7 +72,12 @@ async def _run(
                 scheduler_cfg=cfg["scheduler"],
             )
             scheduler = SchedulerAdapter(cfg["scheduler"])
-            bmc = SimulatedBmc(fail=True) if failing_bmc else redfish
+            if bmc_factory is not None:
+                bmc = bmc_factory(cfg)
+            elif failing_bmc:
+                bmc = SimulatedBmc(fail=True)
+            else:
+                bmc = redfish
             orchestrator = ConfirmedLeakOrchestrator(
                 clock=clock,
                 nvml=nvml,
@@ -156,6 +176,58 @@ def test_a_valve_fault_with_a_failed_power_cut_is_failed_safe(cfg, tmp_path) -> 
     assert steps[-1].status == "REJECTED"
     assert reading.fault is True
     assert power == "On"  # the real BMC was never asked, because the injected one failed
+
+
+def test_a_202_that_never_powers_off_is_failed_safe(cfg, tmp_path) -> None:
+    """A 202 body claiming Off is not evidence; an unverified cut must escalate."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json=_power_body("On"))
+        return httpx.Response(202, json=_power_body("Off"))
+
+    fsm, steps, _, _, _ = asyncio.run(
+        _run(
+            cfg,
+            tmp_path / "checkpoints",
+            bmc_factory=lambda cfg: _redfish_202(
+                cfg, handler, poll_interval_ms=1, power_off_timeout_ms=20
+            ),
+        )
+    )
+
+    assert fsm.state is IncidentState.FAILED_SAFE
+    assert steps[-1].command == "FORCE_OFF"
+    assert steps[-1].status == VERIFICATION_TIMEOUT
+    assert "PowerState=On" in steps[-1].detail
+    assert "power_off" not in [name for name, _ in fsm.events]
+    assert "requeued" not in [name for name, _ in fsm.events]
+
+
+def test_a_202_verified_off_on_the_second_poll_closes_the_sequence(cfg, tmp_path) -> None:
+    polls = {"get": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            polls["get"] += 1
+            return httpx.Response(200, json=_power_body("On" if polls["get"] == 1 else "Off"))
+        return httpx.Response(202, json=_power_body("On"))
+
+    fsm, steps, _, _, _ = asyncio.run(
+        _run(
+            cfg,
+            tmp_path / "checkpoints",
+            bmc_factory=lambda cfg: _redfish_202(
+                cfg, handler, poll_interval_ms=1, power_off_timeout_ms=50
+            ),
+        )
+    )
+
+    assert fsm.state is IncidentState.RESOLVED_PENDING_REPAIR
+    force_off = next(step for step in steps if step.command == "FORCE_OFF")
+    assert force_off.status == VERIFIED_OFF
+    assert polls["get"] == 2
+    assert "power_off" in [name for name, _ in fsm.events]
 
 
 def test_a_corrupt_checkpoint_does_not_block_isolation(cfg, tmp_path) -> None:

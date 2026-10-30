@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ import pytest
 from cryoguard.config import load
 from cryoguard.orchestrator.watchdog import (
     ThermalWatchdog,
+    WatchdogActuationError,
     WatchdogError,
     WatchdogReading,
     WatchdogTrip,
@@ -130,6 +132,8 @@ def test_the_watchdog_still_trips_when_the_perception_loop_is_dead(cfg) -> None:
     assert trip.reason is WatchdogTrip.JUNCTION_OVER_TEMP
     assert "96.4 C" in trip.detail
     assert dog.trip == trip
+    assert dog.trip_initiated is True
+    assert dog.actuated is True
     assert seen == [(WatchdogTrip.JUNCTION_OVER_TEMP, trip.detail)]
 
 
@@ -140,6 +144,68 @@ def test_an_unreadable_sensor_trips_fail_safe(cfg) -> None:
     assert trip.reason is WatchdogTrip.SENSOR_UNAVAILABLE
     assert "NVML handle is gone" in trip.detail
     assert len(seen) == 1
+
+
+def test_a_failing_actuation_callback_is_recorded_and_reraised(cfg, caplog) -> None:
+    """A trip whose actuation raises must not leave the trip state ambiguous."""
+
+    async def case():
+        async def actuate(reason: WatchdogTrip, detail: str) -> None:
+            raise ConnectionResetError("BMC socket reset")
+
+        dog = ThermalWatchdog(
+            FixedSensor(WatchdogReading(96.4)),
+            limit_c=float(cfg["thermal_model"]["watchdog_limit_c"]),
+            period_s=0.0,
+            actuate=actuate,
+        )
+        with pytest.raises(WatchdogActuationError):
+            await dog.run(asyncio.Event())
+        return dog
+
+    with caplog.at_level(logging.CRITICAL):
+        dog = asyncio.run(case())
+
+    assert dog.trip_initiated is True
+    assert dog.trip_initiated_s is not None
+    assert dog.trip is not None
+    assert dog.trip.reason is WatchdogTrip.JUNCTION_OVER_TEMP
+    assert dog.trip.initiated_s == dog.trip_initiated_s
+    assert dog.actuation_failed is True
+    assert "ConnectionResetError" in dog.actuation_error
+    assert "BMC socket reset" in dog.actuation_error
+    assert dog.actuated is False  # the action was never confirmed
+    assert "Watchdog actuation callback failed: BMC socket reset" in caplog.text
+
+
+def test_a_failed_actuation_still_attempts_the_fallback(cfg) -> None:
+    """The fallback is a direct power cut, attempted once before the re-raise."""
+
+    async def case():
+        seen: list[tuple[WatchdogTrip, str]] = []
+
+        async def actuate(reason: WatchdogTrip, detail: str) -> None:
+            raise ConnectionResetError("BMC socket reset")
+
+        async def fallback(reason: WatchdogTrip, detail: str) -> None:
+            seen.append((reason, detail))
+
+        dog = ThermalWatchdog(
+            FixedSensor(WatchdogReading(96.4)),
+            limit_c=float(cfg["thermal_model"]["watchdog_limit_c"]),
+            period_s=0.0,
+            actuate=actuate,
+            fallback=fallback,
+        )
+        with pytest.raises(WatchdogActuationError):
+            await dog.run(asyncio.Event())
+        return dog, seen
+
+    dog, seen = asyncio.run(case())
+
+    assert dog.fallback_attempted is True
+    assert dog.fallback_ok is True
+    assert [reason for reason, _ in seen] == [WatchdogTrip.JUNCTION_OVER_TEMP]
 
 
 def test_a_healthy_watchdog_stops_without_tripping(cfg) -> None:

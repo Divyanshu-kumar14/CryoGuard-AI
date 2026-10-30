@@ -18,7 +18,14 @@ from pathlib import Path
 from typing import Any
 
 from cryoguard.bench.metrics import clopper_pearson, mean_std, percentile
-from cryoguard.bench.runner import BenchRun
+from cryoguard.bench.runner import FITTING_RADIUS_MM, BenchRun
+
+BENCHMARK_TITLE = "Deterministic Regression & Safety Verification Suite (4 Physical Scenarios)"
+SAMPLE_NOTICE = (
+    "Notice: Sample size n=4 across four synthetic benchmark fixtures. These results "
+    "establish deterministic reproducibility across specified physical failure modes, "
+    "not statistical generalization across unmodeled data center environments."
+)
 
 
 def _rate(successes: int, trials: int, confidence: float) -> dict[str, Any]:
@@ -66,6 +73,27 @@ def score(rows: list[dict[str, Any]], confidence: float) -> dict[str, Any]:
     }
 
 
+def verification(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Scenario pass/fail, not a population rate: each fixture has a known answer."""
+
+    counts = _confusion(rows)
+    passed = counts["tp"] + counts["tn"]
+    total = sum(counts.values())
+    positives = counts["tp"] + counts["fn"]
+    negatives = counts["fp"] + counts["tn"]
+    return {
+        "passed": passed,
+        "total": total,
+        "positives": positives,
+        "negatives": negatives,
+        "display": (
+            f"Automated Scenario Verification: {passed}/{total} passing "
+            f"({positives} positive detection scenario{'s' if positives != 1 else ''}, "
+            f"{negatives} negative control scenario{'s' if negatives != 1 else ''})"
+        ),
+    }
+
+
 def _latency(values: list[float], unit: str) -> dict[str, Any]:
     mean, std = mean_std(values)
     if mean is None:
@@ -89,8 +117,17 @@ def _positive_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _localization(rows: list[dict[str, Any]], confidence: float) -> dict[str, Any]:
     localizable = [row for row in rows if row["localizable"]]
-    hits = sum(1 for row in localizable if row["localized"])
-    return _rate(hits, len(localizable), confidence)
+    hits = sum(1 for row in localizable if row["localizedWithinTolerance"])
+    errors = [
+        float(row["localizationErrorMm"])
+        for row in localizable
+        if row["localizationErrorMm"] is not None
+    ]
+    block = _rate(hits, len(localizable), confidence)
+    mean_error = sum(errors) / len(errors) if errors else None
+    block["meanErrorMm"] = None if mean_error is None else round(mean_error, 2)
+    block["meanErrorDisplay"] = "n/a" if mean_error is None else f"{mean_error:.1f} mm"
+    return block
 
 
 def _checkpoint_recovery(rows: list[dict[str, Any]], confidence: float) -> dict[str, Any]:
@@ -111,9 +148,10 @@ def clip_row_payload(run: BenchRun) -> dict[str, Any]:
     row["detectionSDisplay"] = (
         "—" if row["detectionS"] is None else f"{float(row['detectionS']):.2f}"
     )
-    row["localizedDisplay"] = (
-        "n/a" if row["localized"] is None else ("yes" if row["localized"] else "no")
-    )
+    localized = row["localizedWithinTolerance"]
+    row["localizedDisplay"] = "n/a" if localized is None else ("yes" if localized else "no")
+    error_mm = row["localizationErrorMm"]
+    row["localizationErrorDisplay"] = "—" if error_mm is None else f"{float(error_mm):.1f}"
     row["valveVerifiedDisplay"] = (
         "n/a" if row["valveVerified"] is None else ("yes" if row["valveVerified"] else "no")
     )
@@ -161,6 +199,7 @@ def build_payload(
                 "pDisplay",
                 "detectionSDisplay",
                 "localizedDisplay",
+                "localizationErrorDisplay",
                 "valveVerifiedDisplay",
                 "checkpointDisplay",
             }
@@ -178,6 +217,8 @@ def build_payload(
             "generatedAt is the only non-reproducible field; runHash covers the "
             "config, freeze, and every clip row. Wall-clock latency is in latency.json."
         ),
+        "title": BENCHMARK_TITLE,
+        "notice": SAMPLE_NOTICE,
         "configHash": config_hash,
         "fusionHash": fusion_hash,
         "gitSha": git_sha,
@@ -186,9 +227,11 @@ def build_payload(
         "confidencePercent": int(round(confidence * 100)),
         "runHash": digest,
         "headline": score(selected, confidence),
+        "verification": verification(selected),
         "metrics": {name: score(value, confidence) for name, value in by_split.items()},
         "detectionLatencyS": _latency(detection_values, "s"),
         "localization": _localization(selected, confidence),
+        "localizationToleranceMm": FITTING_RADIUS_MM,
         "checkpointRecovery": _checkpoint_recovery(selected, confidence),
         "valveIsolation": _valve_isolation(selected, confidence),
         "clips": rows,
@@ -201,8 +244,12 @@ def build_payload(
             "is reported, not used for fitting.",
             "PLC, BMC, NVML, Slurm, and telemetry are simulators; the in-memory "
             "transport was used for this run.",
-            "Zone match is diagnostic: the simulated leak starts in Zone 0 and "
-            "drifts toward Zone 2, so the fitting (QD-04) is the localization claim.",
+            "Localization is geometric: the candidate centroid in rectified chassis "
+            "millimetres is compared with the configured QD-04 ROI centre. A "
+            "matching origin string is no longer accepted as localization.",
+            "Localization error is measured at the decision frame; the simulated "
+            "leak drifts 11 mm/s from QD-04, so the error includes the spill that "
+            "accumulated before confirmation.",
             "SAM ran in cache mode from a fixture-seeded cache (provenance=fixture); "
             "no hosted SAM call was made.",
             "Detection latency is scenario time from clip start to the decision. "
@@ -215,8 +262,9 @@ def build_payload(
 
 def render_markdown(payload: dict[str, Any]) -> str:
     headline = payload["headline"]
+    tolerance = f"{float(payload['localizationToleranceMm']):.0f}"
     lines = [
-        "# CryoGuard AI — Empirical Benchmark Report",
+        f"# {payload['title']}",
         (
             f"Generated: {payload['generatedAt']} | Config Hash: {payload['configHash']} "
             f"| Git: {payload['gitSha']}"
@@ -232,20 +280,24 @@ def render_markdown(payload: dict[str, Any]) -> str:
         "",
         "## Headline",
         "",
+        f"**{payload['verification']['display']}**",
+        "",
         (
             f"| Metric | Measured Value | {payload['confidencePercent']}% Confidence Interval "
             "(Clopper-Pearson) | Sample Count |"
         ),
         "| :--- | :--- | :--- | :--- |",
         (
-            f"| **Leak Detection Recall** | {headline['recall']['display']} "
+            f"| **Positive Scenario Detection** | {headline['recall']['display']} "
             f"| {headline['recall']['ciDisplay']} | {headline['positives']} "
-            f"positive clip{'s' if headline['positives'] != 1 else ''} |"
+            f"positive fixture{'s' if headline['positives'] != 1 else ''} |"
         ),
         (
-            f"| **False Positive Rate** | {headline['falsePositiveRate']['display']} "
+            f"| **Negative Control False Positive Rate** | "
+            f"{headline['falsePositiveRate']['display']} "
             f"| {headline['falsePositiveRate']['ciDisplay']} "
-            f"| {headline['negatives']} negative clip{'s' if headline['negatives'] != 1 else ''} |"
+            f"| {headline['negatives']} negative fixture"
+            f"{'s' if headline['negatives'] != 1 else ''} |"
         ),
         (
             f"| **Mean Detection Latency** | {payload['detectionLatencyS']['display']} "
@@ -253,9 +305,15 @@ def render_markdown(payload: dict[str, Any]) -> str:
             f"event{'s' if payload['detectionLatencyS']['n'] != 1 else ''} |"
         ),
         (
-            f"| **Fitting Localization Accuracy** | {payload['localization']['display']} "
+            f"| **Fitting Localization (≤ {tolerance} mm)** | "
+            f"{payload['localization']['display']} "
             f"| {payload['localization']['ciDisplay']} "
             f"| {payload['localization']['n']} localizable "
+            f"event{'s' if payload['localization']['n'] != 1 else ''} |"
+        ),
+        (
+            f"| **Mean Localization Error** | {payload['localization']['meanErrorDisplay']} "
+            f"| — | {payload['localization']['n']} localizable "
             f"event{'s' if payload['localization']['n'] != 1 else ''} |"
         ),
         (
@@ -270,6 +328,8 @@ def render_markdown(payload: dict[str, Any]) -> str:
             f"| {payload['valveIsolation']['n']} commanded "
             f"close{'s' if payload['valveIsolation']['n'] != 1 else ''} |"
         ),
+        "",
+        f"> **{payload['notice']}**",
         "",
         "## Per split",
         "",
@@ -289,15 +349,16 @@ def render_markdown(payload: dict[str, Any]) -> str:
         "## Per clip",
         "",
         "| Clip | Split | Ground truth | Predicted | Label | Rule | P "
-        "| Detection (s) | Zone | QD match | Actions |",
-        "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |",
+        "| Detection (s) | Zone | Loc. error (mm) | Within tolerance | Actions |",
+        "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |",
     ]
     for row in payload["clips"]:
         lines.append(
             f"| {row['clipId']} | {row['split']} | {row['groundTruthLabel']} "
             f"| {'incident' if row['predictedIncident'] else 'none'} | {row['label']} "
             f"| {row['ruleId']} | {row['pDisplay']} | {row['detectionSDisplay']} "
-            f"| {row['zone'] if row['zone'] is not None else '—'} | {row['localizedDisplay']} "
+            f"| {row['zone'] if row['zone'] is not None else '—'} "
+            f"| {row['localizationErrorDisplay']} | {row['localizedDisplay']} "
             f"| {row['actionCount']} |"
         )
 

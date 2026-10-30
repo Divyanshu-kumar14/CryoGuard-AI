@@ -139,7 +139,7 @@ function toneForStatus(status) {
     return "ok";
   }
   if (/SLOW/.test(status)) return "warn";
-  if (/FAULT|FAILED|REJECTED/.test(status)) return "bad";
+  if (/FAULT|FAILED|REJECTED|SEAL_LEAK/.test(status)) return "bad";
   return "neutral";
 }
 

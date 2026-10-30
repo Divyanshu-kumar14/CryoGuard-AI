@@ -142,6 +142,8 @@ orchestrator:
 watchdog:
   enabled: true
   period_ms: 100              # its own task, independent of the fusion loop
+  max_staleness_ms: 500       # a sample older than this is a blind sensor
+  max_frozen_ticks: 15        # 15 x period = 1.5 s of a byte-identical trace under load
   # The limit is thermal_model.watchdog_limit_c (90 C), which is validated to
   # sit below thermal_model.t_junction_max_c. One knob, no duplicate literal.
 
@@ -159,6 +161,8 @@ plc:
   valve_slow_ms: 1200         # <= slow: VERIFIED; <= fault: VERIFIED_SLOW; above: FAULT
   valve_fault_ms: 1500
   depressurize_ms: 500
+  depressurized_max_psi: 5.0       # DI 1002 OR pressure <= this proves the line is isolated
+  depressurize_timeout_ms: 1500    # limit closed but still above max => VALVE_SEAL_LEAK
   open_pressure_psi: 34.0
   nominal_flow_lpm: 9.0
   tick_ms: 20
@@ -174,6 +178,8 @@ bmc:
   timeout_ms: 2000
   max_retries: 2
   retry_backoff_ms: 50
+  poll_interval_ms: 200              # power-state readback cadence after an accepted reset
+  power_off_timeout_ms: 3000         # unverified power-off becomes FAILED_SAFE
   token_env: "CRYOGUARD_BMC_TOKEN"    # optional; secrets only via the environment
 
 thermal_model:

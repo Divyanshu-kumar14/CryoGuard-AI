@@ -58,13 +58,22 @@ class PlcSnapshot:
 
 
 class PlcSimulator:
-    def __init__(self, cfg: dict[str, Any], *, travel_ms: float | None = None) -> None:
+    def __init__(
+        self,
+        cfg: dict[str, Any],
+        *,
+        travel_ms: float | None = None,
+        seal_leak_psi: float | None = None,
+    ) -> None:
         self.travel_ms = float(travel_ms if travel_ms is not None else cfg["valve_travel_ms"])
         self.slow_ms = float(cfg["valve_slow_ms"])
         self.fault_ms = float(cfg["valve_fault_ms"])
         self.depressurize_ms = float(cfg["depressurize_ms"])
         self.open_pressure_psi = float(cfg["open_pressure_psi"])
         self.nominal_flow_lpm = float(cfg["nominal_flow_lpm"])
+        # Test/demo knob: a stem that closes over blown seals. The limit switch
+        # reads closed, the line never depressurizes, pressure stays at this value.
+        self.seal_leak_psi = seal_leak_psi
         if not 0 < self.travel_ms:
             raise PlcError(f"valve travel must be positive: {self.travel_ms}")
         if not 0 < self.slow_ms <= self.fault_ms:
@@ -139,6 +148,15 @@ class PlcSimulator:
 
         if self.state is ValveState.CLOSED:
             assert self._closed_at is not None
+            if self.seal_leak_psi is not None:
+                # Blown seals: the stem is on its limit switch, the branch is not isolated.
+                return self._snapshot(
+                    limit=True,
+                    depressurized=False,
+                    pressure=self.seal_leak_psi,
+                    flow=0.0,
+                    fault=False,
+                )
             depressurized = (self.elapsed_s - self._closed_at) * 1000.0 >= self.depressurize_ms
             return self._snapshot(
                 limit=True,

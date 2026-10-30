@@ -6,20 +6,25 @@ import json
 import socket
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
 
 from cryoguard.bench.report import build_payload
 from cryoguard.bench.runner import (
+    FITTING_RADIUS_MM,
     BenchError,
+    _row,
     load_manifest,
     no_network,
+    qd_centroid_mm,
     run_benchmark,
     select_clips,
     verify_clip,
 )
 from cryoguard.config import config_hash, load
+from cryoguard.pipeline import RunResult
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -44,6 +49,70 @@ def test_the_manifest_selects_the_declared_split() -> None:
     ]
     with pytest.raises(BenchError, match="no clips"):
         select_clips(manifest, "holdout")
+
+
+def _clip(qd: str = "QD-04") -> dict:
+    return {
+        "id": "sim_leak_qd4",
+        "scenario": "slow_leak_qd4",
+        "split": "dev",
+        "path": "fixtures/videos/simulated/sim_leak_qd4.mp4",
+        "sha256": "0" * 64,
+        "ground_truth_label": "CONFIRMED_LEAK",
+        "qd_origin": qd,
+        "expected_zone": 0,
+    }
+
+
+def _result(centroid_mm: tuple[float, float] | None, *, origin: str = "QD-04 (Zone 0)"):
+    report = (
+        SimpleNamespace(
+            deterministic_actions_taken=[],
+            suspected_origin=origin,
+            physical_evidence=SimpleNamespace(zone=0, label="CONFIRMED_LEAK", p_leak=0.9),
+        )
+        if centroid_mm is not None
+        else None
+    )
+    return RunResult(
+        scenario="slow_leak_qd4",
+        decision=None,
+        report=report,  # type: ignore[arg-type]
+        path=None,
+        frames=1,
+        ticks=1,
+        tick_rate_hz=5.0,
+        rate_changes=0,
+        sam=None,
+        centroid_mm=centroid_mm,
+    )
+
+
+def test_the_qd_centroid_is_the_configured_roi_centre(topology) -> None:
+    assert qd_centroid_mm(topology, "QD-04") == (195.0, 145.0)
+    assert qd_centroid_mm(topology, "QD-99") is None
+
+
+def test_localization_is_a_geometric_distance_not_an_origin_string(topology) -> None:
+    clip = _clip()
+
+    near = _row(clip, _result((203.4, 145.0)), topology)
+    assert near.localization_error_mm == pytest.approx(8.4)
+    assert near.localized_within_tolerance is True
+    assert FITTING_RADIUS_MM == 25.0
+
+    # Same "QD-04" origin string, but 50 mm away: not a localization.
+    far = _row(clip, _result((195.0, 195.0), origin="QD-04 (Zone 0)"), topology)
+    assert far.localization_error_mm == pytest.approx(50.0)
+    assert far.localized_within_tolerance is False
+
+
+def test_a_clip_without_a_candidate_centroid_is_not_localizable(topology) -> None:
+    row = _row(_clip(), _result(None), topology)
+
+    assert row.localizable is False
+    assert row.localization_error_mm is None
+    assert row.localized_within_tolerance is None
 
 
 def test_a_tampered_clip_is_refused(tmp_path) -> None:

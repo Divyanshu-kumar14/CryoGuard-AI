@@ -45,8 +45,11 @@ class IncidentState(StrEnum):
 
 
 class ValveStatus(StrEnum):
+    """``VALVE_SEAL_LEAK``: the stem closed, the line did not depressurize."""
+
     VERIFIED = "VERIFIED"
     VERIFIED_SLOW = "VERIFIED_SLOW"
+    VALVE_SEAL_LEAK = "VALVE_SEAL_LEAK"
     FAULT = "FAULT"
 
 

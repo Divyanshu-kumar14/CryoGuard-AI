@@ -50,11 +50,16 @@ async def _wait_started(server: uvicorn.Server, task: asyncio.Task[None]) -> Non
 
 @asynccontextmanager
 async def loopback_simulators(
-    cfg: dict[str, Any], *, plc_travel_ms: float | None = None
+    cfg: dict[str, Any],
+    *,
+    plc_travel_ms: float | None = None,
+    plc_seal_leak_psi: float | None = None,
 ) -> AsyncIterator[SimEndpoints]:
-    simulator = (
-        PlcSimulator(cfg["plc"], travel_ms=plc_travel_ms) if plc_travel_ms is not None else None
-    )
+    simulator = None
+    if plc_travel_ms is not None or plc_seal_leak_psi is not None:
+        simulator = PlcSimulator(
+            cfg["plc"], travel_ms=plc_travel_ms, seal_leak_psi=plc_seal_leak_psi
+        )
     plc = PlcModbusServer(cfg["plc"], port=0, simulator=simulator)
     await plc.start()
 

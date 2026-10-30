@@ -5,6 +5,11 @@ issue ``ComputerSystem.Reset`` with ``ForceOff``. Retries are safe because
 ForceOff is idempotent: a 409 that says the system is already off is success, not
 a failure. A 5xx is retried; a 4xx is not.
 
+A 2xx (including 202 Accepted) only means the BMC queued the request, not that
+the node lost power. Every accepted reset is therefore verified by polling
+``PowerState`` until it reads ``Off`` or the configured timeout expires; a reset
+nobody can confirm is reported as a failure, never as a power-off.
+
 Every response from the mock carries ``Oem.CryoGuard.simulated = true``. The
 client surfaces that flag so the incident report can label the action honestly.
 """
@@ -18,7 +23,10 @@ from typing import Any
 
 import httpx
 
-from cryoguard.orchestrator.incident_fsm import PowerResult
+from cryoguard.orchestrator.incident_fsm import VERIFICATION_TIMEOUT, VERIFIED_OFF, PowerResult
+
+DEFAULT_POLL_INTERVAL_MS = 200
+DEFAULT_POWER_OFF_TIMEOUT_MS = 3000
 
 
 class RedfishError(ValueError):
@@ -49,6 +57,10 @@ class RedfishClient:
         self.timeout_s = float(cfg["timeout_ms"]) / 1000.0
         self.max_retries = int(cfg["max_retries"])
         self.retry_backoff_s = float(cfg["retry_backoff_ms"]) / 1000.0
+        self.poll_interval_s = float(cfg.get("poll_interval_ms", DEFAULT_POLL_INTERVAL_MS)) / 1000.0
+        self.power_off_timeout_s = (
+            float(cfg.get("power_off_timeout_ms", DEFAULT_POWER_OFF_TIMEOUT_MS)) / 1000.0
+        )
         self.headers = {"Content-Type": "application/json"}
         token_env = str(cfg.get("token_env", ""))
         if token_env:
@@ -65,6 +77,12 @@ class RedfishClient:
             raise RedfishError(f"timeout_ms must be positive: {cfg['timeout_ms']}")
         if self.max_retries < 0:
             raise RedfishError(f"max_retries must be non-negative: {self.max_retries}")
+        if self.poll_interval_s <= 0:
+            raise RedfishError(f"poll_interval_ms must be positive: {self.poll_interval_s * 1000}")
+        if self.power_off_timeout_s < 0:
+            raise RedfishError(
+                f"power_off_timeout_ms must be non-negative: {self.power_off_timeout_s * 1000}"
+            )
 
     @contextmanager
     def _http(self) -> Iterator[httpx.Client]:
@@ -90,6 +108,24 @@ class RedfishClient:
         except (httpx.HTTPError, RedfishError, ValueError):
             return "Unknown"
 
+    def _await_off(self) -> tuple[bool, str]:
+        """Poll until ``PowerState`` reads ``Off`` or the deadline passes.
+
+        Returns the verdict and the last state read. ``Unknown`` is not a verdict:
+        a GET that fails is retried on the next poll, never treated as success. A
+        poll already in flight is bounded by ``timeout_ms``, so the deadline can
+        overshoot by at most one request.
+        """
+
+        deadline = time.monotonic() + self.power_off_timeout_s
+        while True:
+            state = self.power_state()
+            if state == "Off":
+                return True, state
+            if time.monotonic() >= deadline:
+                return False, state
+            time.sleep(self.poll_interval_s)
+
     def force_off(self) -> PowerResult:
         attempts = 0
         last_detail = ""
@@ -113,9 +149,31 @@ class RedfishClient:
             except ValueError:
                 body = {}
 
-            if response.status_code == 202:
-                state = str(body.get("PowerState", "Off"))
-                return PowerResult(True, state, attempts, 202, _simulated(body) or self.simulated)
+            if response.status_code in (200, 202, 204):
+                # Accepted is not off. The body's PowerState is the BMC echoing its
+                # intent, not evidence; only a readback can end the sequence.
+                simulated = _simulated(body) or self.simulated
+                verified, state = self._await_off()
+                if verified:
+                    return PowerResult(
+                        True,
+                        state,
+                        attempts,
+                        response.status_code,
+                        simulated,
+                        "",
+                        VERIFIED_OFF,
+                    )
+                detail = f"PowerState still {state} after {self.power_off_timeout_s * 1000:.0f} ms"
+                return PowerResult(
+                    False,
+                    state,
+                    attempts,
+                    response.status_code,
+                    simulated,
+                    detail,
+                    VERIFICATION_TIMEOUT,
+                )
 
             if response.status_code == 409:
                 state = self.power_state()
@@ -127,6 +185,7 @@ class RedfishClient:
                         409,
                         _simulated(body) or self.simulated,
                         "already off",
+                        VERIFIED_OFF,
                     )
                 return PowerResult(
                     False,

@@ -2,14 +2,16 @@
 
 Two invariants, both tested:
   1. the valve is never commanded before the power clamp is verified by readback;
-  2. isolation is reached on the limit switch alone - a pending checkpoint must
-     not delay it (delta C-04). The checkpoint gates power-off, not isolation.
+  2. isolation is reached on verified closure - the limit switch *and* a
+     depressurized line - and a pending checkpoint must not delay it (delta
+     C-04). The checkpoint gates power-off, not isolation.
 
-Failure paths follow T-FSM-04: a clamp readback failure or a valve limit-switch
-FAULT escalates to a node power cut. Only when that cut also fails does the
-sequence exit ``FAILED_SAFE``. A valve that did not close is never reported as
-isolated, and a power cut that was not accepted is never reported as
-``NODE_POWERED_DOWN``.
+Failure paths follow T-FSM-04: a clamp readback failure, a valve limit-switch
+FAULT, or a stem that closes onto a still-pressurized line (VALVE_SEAL_LEAK)
+escalates to a node power cut. Only when that cut also fails does the sequence
+exit ``FAILED_SAFE``. A valve that did not close is never reported as isolated,
+and a power cut that was not accepted and read back as ``Off`` is never reported
+as ``NODE_POWERED_DOWN``.
 """
 
 from __future__ import annotations
@@ -117,6 +119,10 @@ class ValveResult:
     nominal_ms: float = 0.0
 
 
+VERIFIED_OFF = "VERIFIED_OFF"
+VERIFICATION_TIMEOUT = "VERIFICATION_TIMEOUT"
+
+
 @dataclass(frozen=True)
 class PowerResult:
     ok: bool
@@ -125,6 +131,9 @@ class PowerResult:
     status_code: int = 0
     simulated: bool = True
     detail: str = ""
+    # Readback outcome, set only by a port that actually verified power off. An
+    # empty value means the port reports acceptance (ok) alone.
+    status: str = ""
 
 
 @dataclass(frozen=True)
@@ -172,7 +181,7 @@ class ConfirmedLeakOrchestrator:
     def _power_cut(self, reason: str) -> PowerResult:
         power = self.bmc.force_off()
         source = "SIMULATED" if power.simulated else "live"
-        status = "ACCEPTED" if power.ok else "REJECTED"
+        status = power.status or ("ACCEPTED" if power.ok else "REJECTED")
         detail = f"{reason}; PowerState={power.state} ({source} BMC)"
         if power.detail:
             detail = f"{detail}; {power.detail}"
@@ -236,6 +245,8 @@ class ConfirmedLeakOrchestrator:
         valve = self.plc.close_valve()
         if valve.status is ValveStatus.FAULT:
             valve_status = "FAULT"
+        elif valve.status is ValveStatus.VALVE_SEAL_LEAK:
+            valve_status = "VALVE_SEAL_LEAK"
         elif valve.status is ValveStatus.VERIFIED_SLOW:
             valve_status = "LIMIT_SWITCH_CLOSED_SLOW"
         else:
@@ -247,11 +258,18 @@ class ConfirmedLeakOrchestrator:
             valve.detail or f"limit switch; band {valve.status.value}",
         )
 
-        # A FAULT means closure is unverified, so isolation was never achieved.
-        # Claiming ISOLATED here would be the most dangerous lie in the sequence.
-        if valve.status is ValveStatus.FAULT:
+        # A FAULT means the stem never closed; a VALVE_SEAL_LEAK means it closed
+        # but the branch is still pressurized. Anything short of a verified,
+        # depressurized close is not isolation: coolant is still reaching the
+        # chassis, so cut power now and claim nothing else.
+        if valve.status not in (ValveStatus.VERIFIED, ValveStatus.VERIFIED_SLOW):
             self._cordon()
-            power = self._power_cut("valve limit switch fault")
+            reason = (
+                "valve seal leak: line still pressurized"
+                if valve.status is ValveStatus.VALVE_SEAL_LEAK
+                else "valve limit switch fault"
+            )
+            power = self._power_cut(reason)
             fsm.fire("hard_trip" if power.ok else "failed_safe", self.clock.now())
             return fsm
         # The scenario clock advances by the configured nominal travel, not the

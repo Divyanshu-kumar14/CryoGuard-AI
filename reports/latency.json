@@ -1,49 +1,49 @@
 {
-  "configHash": "de5bd0f0d16e7607",
+  "configHash": "1ce8a0508d6fddc5",
   "deterministic": false,
-  "gitSha": "90ac543",
+  "gitSha": "a777b44",
   "note": "Wall-clock samples from one local run. They are measured, not assumed, and are excluded from benchmark.json so that file stays reproducible.",
   "perClip": [
     {
       "clipId": "sim_leak_qd4",
       "fusionMs": {
-        "median": 0.05591200169874355,
+        "median": 0.053995005146134645,
         "n": 75,
-        "p95": 0.0701253014995018
+        "p95": 0.06705700361635536
       },
       "perceptionTickMs": {
-        "median": 18.029216000286397,
+        "median": 18.095597995852586,
         "n": 75,
-        "p95": 29.654772501089603
+        "p95": 25.363338497845685
       },
       "samCachedMs": {
-        "median": 7.139252998968004,
+        "median": 6.4758360022096895,
         "n": 8,
-        "p95": 9.669301898429694
+        "p95": 8.808779199171111
       },
       "samLiveMs": {
         "median": null,
         "n": 0,
         "p95": null
       },
-      "sequenceMs": 0.22668699966743588
+      "sequenceMs": 0.21758600632892922
     },
     {
       "clipId": "sim_condensation",
       "fusionMs": {
-        "median": 0.06018849853717256,
+        "median": 0.06675149779766798,
         "n": 40,
-        "p95": 0.07246165059768828
+        "p95": 0.0779048048570985
       },
       "perceptionTickMs": {
-        "median": 19.09082349811797,
+        "median": 25.539848997141235,
         "n": 40,
-        "p95": 27.48372990226926
+        "p95": 28.961812897614436
       },
       "samCachedMs": {
-        "median": 4.540955500488053,
+        "median": 6.359070001053624,
         "n": 20,
-        "p95": 6.294808949678554
+        "p95": 6.775278095665271
       },
       "samLiveMs": {
         "median": null,
@@ -55,19 +55,19 @@
     {
       "clipId": "sim_glint",
       "fusionMs": {
-        "median": 0.05624599907605443,
+        "median": 0.05412150130723603,
         "n": 100,
-        "p95": 0.07453525140590499
+        "p95": 0.06008225209370721
       },
       "perceptionTickMs": {
-        "median": 17.295870500674937,
+        "median": 17.96945300520747,
         "n": 100,
-        "p95": 24.94660339743859
+        "p95": 23.13156279960822
       },
       "samCachedMs": {
-        "median": 4.486877000090317,
+        "median": 5.051669999375008,
         "n": 20,
-        "p95": 6.548215799921309
+        "p95": 5.476449947673246
       },
       "samLiveMs": {
         "median": null,
@@ -79,45 +79,45 @@
     {
       "clipId": "sim_hidden_hydraulic",
       "fusionMs": {
-        "median": 0.05689799945685081,
+        "median": 0.04628000169759616,
         "n": 8,
-        "p95": 0.06871934965602121
+        "p95": 0.05893279885640368
       },
       "perceptionTickMs": {
-        "median": 19.78061699992395,
+        "median": 18.73077900017961,
         "n": 8,
-        "p95": 21.570088001499244
+        "p95": 23.013712698229938
       },
       "samCachedMs": {
-        "median": 4.448774499905994,
+        "median": 4.88890549968346,
         "n": 4,
-        "p95": 5.450809900503373
+        "p95": 4.966330950992415
       },
       "samLiveMs": {
         "median": null,
         "n": 0,
         "p95": null
       },
-      "sequenceMs": 0.09426899850950576
+      "sequenceMs": 0.06243499956326559
     }
   ],
-  "runHash": "76edbee924a65714060ed962142d09c6e061cf086fca5fba27a66119c00b3aab",
+  "runHash": "0b2d56ddf07d65669f09070c21237c267457aa81551939cce7fa9b67545a1fa2",
   "schemaVersion": "1.0",
   "stages": {
     "fusionMs": {
-      "median": 0.05630499799735844,
+      "median": 0.05484499706653878,
       "n": 223,
-      "p95": 0.07263339866767637
+      "p95": 0.07088929924066177
     },
     "perceptionTickMs": {
-      "median": 18.029216000286397,
+      "median": 18.47406399610918,
       "n": 223,
-      "p95": 27.574916198864226
+      "p95": 28.252918302314356
     },
     "samCachedMs": {
-      "median": 4.606113499903586,
+      "median": 6.024995000188937,
       "n": 52,
-      "p95": 7.655774599879804
+      "p95": 7.013505146460373
     },
     "samLiveMs": {
       "median": null,
@@ -125,9 +125,9 @@
       "p95": null
     },
     "sequenceMs": {
-      "median": 0.16047799908847082,
+      "median": 0.1400105029460974,
       "n": 2,
-      "p95": 0.22006609960953938
+      "p95": 0.20982845599064603
     }
   }
 }
