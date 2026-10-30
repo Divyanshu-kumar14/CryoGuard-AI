@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,8 @@ import yaml
 
 from cryoguard.config import load
 from cryoguard.models import SystemLabel
-from cryoguard.pipeline import run_scenario
+from cryoguard.perception.sam_seed import seed_fixture_cache
+from cryoguard.pipeline import RunResult, load_scenario, run_scenario
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -24,18 +26,27 @@ def topology() -> dict:
     return yaml.safe_load((ROOT / "configs" / "topology.yaml").read_text(encoding="utf-8"))
 
 
+def run(
+    name: str,
+    cfg: dict,
+    topology: dict,
+    out_dir: Path,
+    seconds: float = 10.0,
+    **kwargs,
+) -> RunResult:
+    return asyncio.run(
+        run_scenario(name, cfg, topology, out_dir=out_dir, max_seconds=seconds, **kwargs)
+    )
+
+
 @pytest.fixture(scope="module")
 def leak(cfg, topology, tmp_path_factory):
-    return run_scenario(
-        "leak", cfg, topology, out_dir=tmp_path_factory.mktemp("leak"), max_seconds=10.0
-    )
+    return run("leak", cfg, topology, tmp_path_factory.mktemp("leak"))
 
 
 @pytest.fixture(scope="module")
 def hidden(cfg, topology, tmp_path_factory):
-    return run_scenario(
-        "hidden", cfg, topology, out_dir=tmp_path_factory.mktemp("hidden"), max_seconds=10.0
-    )
+    return run("hidden", cfg, topology, tmp_path_factory.mktemp("hidden"))
 
 
 @pytest.mark.slow
@@ -80,9 +91,7 @@ def test_hidden_hydraulic_event_drains_without_moving_a_valve(hidden) -> None:
 @pytest.mark.slow
 def test_condensation_and_glint_produce_no_incident(cfg, topology, tmp_path_factory) -> None:
     for name in ("condensation", "glint"):
-        result = run_scenario(
-            name, cfg, topology, out_dir=tmp_path_factory.mktemp(name), max_seconds=8.0
-        )
+        result = run(name, cfg, topology, tmp_path_factory.mktemp(name), seconds=8.0)
         assert result.report is None, name
         assert result.decision is not None, name
 
@@ -93,7 +102,46 @@ def test_incident_ids_are_stable_and_unique(cfg, topology, tmp_path_factory, lea
     assert hidden.report.incident_id.endswith("-04")
 
     first = leak.path.read_bytes()
-    again = run_scenario(
-        "leak", cfg, topology, out_dir=tmp_path_factory.mktemp("again"), max_seconds=10.0
-    )
+    again = run("leak", cfg, topology, tmp_path_factory.mktemp("again"))
     assert again.path.read_bytes() == first
+
+
+@pytest.mark.slow
+def test_adaptive_sampling_changes_rate_on_evidence(leak) -> None:
+    # The leak clip starts with a candidate (5 Hz) and escalates (10 Hz).
+    assert leak.rate_changes >= 2
+    assert leak.tick_rate_hz == pytest.approx(10.0)
+
+
+@pytest.mark.slow
+def test_seeded_sam_cache_reanchors_without_a_network_call(
+    cfg, topology, tmp_path, tmp_path_factory
+) -> None:
+    cache = tmp_path / "sam_cache"
+    scenario = load_scenario("leak")
+    written = seed_fixture_cache(
+        clip_path=ROOT / scenario["clip"],
+        topology=topology,
+        cfg=cfg,
+        cache_dir=cache,
+    )
+    assert written > 0
+
+    result = run(
+        "leak",
+        cfg,
+        topology,
+        tmp_path_factory.mktemp("sam"),
+        seconds=10.0,
+        sam_mode="cache",
+        sam_cache_dir=cache,
+    )
+
+    assert result.sam is not None
+    assert result.sam.mode == "cache"
+    assert result.sam.applied > 0
+    assert result.sam.cached == result.sam.applied
+    assert result.sam.live == 0
+    assert result.sam.fixture == result.sam.applied
+    assert result.sam.failures == 0
+    assert result.report is not None

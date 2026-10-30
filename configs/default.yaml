@@ -21,7 +21,8 @@ camera:
     brightness_min: 20.0
     brightness_max: 235.0
     focus_min: 15.0            # Laplacian variance
-    saturation_max: 0.05       # clipped-pixel fraction
+    saturation_max: 0.35       # the ArUco quiet zones are white by design (~20% of a
+                               # rectified view); this catches a blown sensor, not fiducials
     max_frame_age_s: 0.1
 
 perception:
@@ -41,16 +42,23 @@ perception:
   link_radius_mm: 25.0
   candidate_ttl_ticks: 3       # FR-PER-05: shorter-lived candidates are GLINT_NOISE
   solidity_ref: 0.6            # area / convex hull; robustness to a wet trail
+  exposure_clip_max: 0.05      # hard gate: a mostly-blown-out mask cannot localise
   q_min: 0.5                   # mask quality gate for R1/R2
   wetness_ticks: 3             # FR-FUS-05: continuous path to the QD ROI
+  reanchor_radius_mm: 15.0     # SAM mask -> existing track association
 
 sam:
+  mode: "off"                  # off | cache | live; cache never touches the network
   model: "sam-3.1"
   base_url: "https://api.meta.ai/v1"
   timeout_sec: 4.0
   async_rate_hz: 1.0           # D-02: <= 2 Hz
   in_flight: 1
   prompt_max_tokens: 32        # hosted API limit
+  mask_threshold: 127          # grayscale >= threshold is foreground
+  max_retries: 1
+  roi_margin_mm: 10.0
+  anchor_ttl_s: 1.2            # a SAM anchor bridges the gap to the next call
   cache_dir: "artifacts/sam_cache"
   prompts:
     coolant: "fluorescent yellow liquid droplet"

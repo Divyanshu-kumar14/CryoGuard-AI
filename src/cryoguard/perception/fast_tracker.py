@@ -57,6 +57,7 @@ class Track:
     last_t: float
     hits: int = 1
     misses: int = 0
+    sam_t_s: float | None = None
     _area_history: list[tuple[float, float]] = field(default_factory=list, repr=False)
 
     @property
@@ -103,6 +104,7 @@ class FastTracker:
         self._next_id = 1
         self._tracks: list[Track] = []
         self.last_mask: np.ndarray | None = None
+        self.last_warped: np.ndarray | None = None
 
         self._kernel_open = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE,
@@ -120,6 +122,8 @@ class FastTracker:
     def reset(self) -> None:
         self._tracks.clear()
         self._next_id = 1
+        self.last_mask = None
+        self.last_warped = None
 
     def mask_for(self, image_bgr: np.ndarray) -> np.ndarray:
         if image_bgr.ndim != 3 or image_bgr.shape[2] != 3:
@@ -152,10 +156,64 @@ class FastTracker:
 
         mask = self.mask_for(warped_bgr)
         self.last_mask = mask
+        self.last_warped = warped_bgr
         detections = self._detections(mask, warped_bgr, px_per_mm)
         self._associate(detections, t_s)
 
         return [track for track in self._tracks if track.misses == 0]
+
+    def reanchor(
+        self, mask: np.ndarray, warped_bgr: np.ndarray, t_s: float, px_per_mm: float
+    ) -> list[Track]:
+        """Apply an external (SAM) mask without counting classical misses.
+
+        This runs at <=2 Hz between high-rate threshold ticks, so it must not
+        advance the miss counter for tracks the SAM mask does not mention. A
+        matched track keeps its identity and its area history; the SAM mask only
+        refreshes geometry, which is what makes it an *anchor* rather than a
+        second, slower tracker.
+        """
+
+        if px_per_mm <= 0:
+            raise TrackerError(f"px_per_mm must be positive: {px_per_mm}")
+        binary = np.where(mask.astype(bool), 255, 0).astype(np.uint8)
+        detections = self._detections(binary, warped_bgr, px_per_mm)
+
+        radius = float(self.cfg.get("reanchor_radius_mm", self.cfg["link_radius_mm"]))
+        pairs: list[tuple[float, int, int]] = []
+        for track_index, track in enumerate(self._tracks):
+            for det_index, det in enumerate(detections):
+                distance = float(
+                    np.hypot(
+                        det.centroid_mm[0] - track.centroid_mm[0],
+                        det.centroid_mm[1] - track.centroid_mm[1],
+                    )
+                )
+                if distance <= radius:
+                    pairs.append((distance, track_index, det_index))
+        pairs.sort()
+
+        used_tracks: set[int] = set()
+        used_dets: set[int] = set()
+        for _, track_index, det_index in pairs:
+            if track_index in used_tracks or det_index in used_dets:
+                continue
+            used_tracks.add(track_index)
+            used_dets.add(det_index)
+            track = self._tracks[track_index]
+            self._apply_geometry(track, detections[det_index])
+            track.last_t = max(track.last_t, t_s)
+            track.misses = 0
+            track.sam_t_s = t_s
+
+        for det_index, det in enumerate(detections):
+            if det_index not in used_dets:
+                track = self._spawn(det, t_s)
+                track.sam_t_s = t_s
+                self._tracks.append(track)
+
+        self._tracks.sort(key=lambda track: track.track_id)
+        return [track for track in self._tracks if track.sam_t_s == t_s]
 
     def _detections(
         self, mask: np.ndarray, warped_bgr: np.ndarray, px_per_mm: float
@@ -259,6 +317,18 @@ class FastTracker:
         return track
 
     def _apply(self, track: Track, det: Detection, t_s: float) -> None:
+        self._apply_geometry(track, det)
+        track.last_t = t_s
+        track.hits += 1
+        track.misses = 0
+
+        window = int(self.cfg["growth_window"])
+        track._area_history.append((t_s, det.area_mm2))
+        track._area_history = track._area_history[-window:]
+        track.dA_dt_mm2_per_s = self._slope(track._area_history)
+
+    @staticmethod
+    def _apply_geometry(track: Track, det: Detection) -> None:
         track.centroid_mm = det.centroid_mm
         track.area_mm2 = det.area_mm2
         track.mean_intensity = det.mean_intensity
@@ -269,14 +339,6 @@ class FastTracker:
         track.bbox_mm = det.bbox_mm
         track.mask = det.mask
         track.offset_px = det.offset_px
-        track.last_t = t_s
-        track.hits += 1
-        track.misses = 0
-
-        window = int(self.cfg["growth_window"])
-        track._area_history.append((t_s, det.area_mm2))
-        track._area_history = track._area_history[-window:]
-        track.dA_dt_mm2_per_s = self._slope(track._area_history)
 
     @staticmethod
     def _slope(history: list[tuple[float, float]]) -> float:

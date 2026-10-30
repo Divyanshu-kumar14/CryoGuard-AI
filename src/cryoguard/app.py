@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
 from pathlib import Path
 
@@ -22,6 +23,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--out", default=None, help="incident directory")
     parser.add_argument("--max-seconds", type=float, default=None, help="stop after N clip seconds")
+    parser.add_argument(
+        "--sam",
+        choices=("off", "cache", "live"),
+        default=None,
+        help="SAM mode; default comes from configs/default.yaml (off)",
+    )
+    parser.add_argument(
+        "--sam-cache",
+        default=None,
+        help="override sam.cache_dir (useful for a seeded fixture cache)",
+    )
     args = parser.parse_args(argv)
 
     if not args.headless:
@@ -31,11 +43,33 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load(ROOT / "configs" / "default.yaml")
     topology = yaml.safe_load((ROOT / "configs" / "topology.yaml").read_text(encoding="utf-8"))
 
-    result = run_scenario(
-        args.scenario, cfg, topology, out_dir=args.out, max_seconds=args.max_seconds
+    result = asyncio.run(
+        run_scenario(
+            args.scenario,
+            cfg,
+            topology,
+            out_dir=args.out,
+            max_seconds=args.max_seconds,
+            sam_mode=args.sam,
+            sam_cache_dir=args.sam_cache,
+        )
     )
 
     print(f"scenario  {result.scenario} (SIMULATED)")
+    print(
+        f"ticks     {result.ticks} at {result.tick_rate_hz:.0f} Hz "
+        f"({result.rate_changes} rate changes)"
+    )
+    if result.sam is not None:
+        sam = result.sam
+        source = "fixture" if sam.fixture else "api"
+        print(
+            f"sam       {sam.mode}: {sam.applied} masks, {sam.cached} cached, "
+            f"{sam.live} live, {sam.failures} failures ({source})"
+        )
+        if sam.mode == "cache" and sam.fixture == sam.applied and sam.applied:
+            print("sam       provenance=fixture (seeded from the deterministic mask; no API call)")
+
     if result.report is None or result.decision is None:
         print(f"outcome   no incident in {result.ticks} ticks ({result.frames} frames)")
         return 0

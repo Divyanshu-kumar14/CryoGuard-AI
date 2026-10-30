@@ -51,6 +51,11 @@ class WetnessTracker:
             if track_id not in active_ids:
                 del self._streak[track_id]
 
+    def value(self, track_id: int) -> float:
+        """Current W without advancing the streak (for a second reading in a tick)."""
+
+        return 1.0 if self._streak.get(track_id, 0) >= self._ticks_required else 0.0
+
     def update(self, track: Track, full_mask: np.ndarray | None) -> bool:
         if full_mask is None or full_mask.shape != self._qd_mask.shape:
             return False

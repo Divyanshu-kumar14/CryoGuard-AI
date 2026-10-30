@@ -15,4 +15,10 @@ def mask_quality(track: Track, perception_cfg: dict[str, Any]) -> float:
     q_area = min(1.0, track.area_mm2 / float(perception_cfg["min_area_mm2"]))
     q_clip = 1.0 - min(1.0, max(0.0, track.clipped_fraction))
     q_solid = min(1.0, track.solidity / float(perception_cfg["solidity_ref"]))
-    return q_area * q_clip * q_solid
+    quality = q_area * q_clip * q_solid
+
+    # A mask that is mostly sensor saturation cannot localise a leak, whatever
+    # its shape. This is a hard gate, not a soft penalty: R1/R2 require q_min.
+    if track.clipped_fraction > float(perception_cfg["exposure_clip_max"]):
+        return 0.0
+    return quality

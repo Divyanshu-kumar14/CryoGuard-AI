@@ -24,5 +24,5 @@ def chassis_frame(blobs: list[tuple[int, int, int]], size=(600, 400)) -> np.ndar
     width, height = size
     image = np.zeros((height, width, 3), dtype=np.uint8)
     for radius, x, y in blobs:
-        cv2.circle(image, (int(x), int(y)), int(radius), (0, 255, 0), -1, lineType=cv2.LINE_8)
+        cv2.circle(image, (int(x), int(y)), int(radius), (0, 220, 40), -1, lineType=cv2.LINE_8)
     return image

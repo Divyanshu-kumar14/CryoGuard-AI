@@ -1,0 +1,22 @@
+{
+  "_note": "SCHEMA FIXTURE, NOT A CAPTURED API RESPONSE. The hosted SAM 3.1 response shape could not be confirmed without an API key. This file exercises the parser and the cache; provenance is written as 'fixture', never 'api'.",
+  "id": "resp_schema_fixture_0001",
+  "model": "sam-3.1",
+  "object": "response",
+  "output": [
+    {
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "{\"masks\": [{\"bbox_px\": [8, 10, 40, 30], \"score\": 0.93, \"mask_png_base64\": \"iVBORw0KGgoAAAANSUhEUgAAAEAAAAAwCAAAAACEICPDAAAAL0lEQVRIx2NgGAWjYDAARhjjP7EK0QATpS4YNWDUgFEDRg0YPAaMglEwCkbB4AEAwXQBKDZQ+RMAAAAASUVORK5CYII=\"}]}"
+        }
+      ]
+    }
+  ],
+  "usage": {
+    "input_tokens": 4,
+    "output_tokens": 0
+  }
+}
