@@ -7,6 +7,7 @@ the evidence or invent a number.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 
 from cryoguard.report.schema import ActionModel, EvidenceModel, IncidentReport
@@ -31,7 +32,7 @@ _RECOMMENDATIONS = {
 def build_fallback_report(
     *,
     evidence: EvidenceModel,
-    actions: list[ActionModel],
+    actions: Sequence[ActionModel],
     incident_time: datetime,
     rack_id: str,
     run_index: int,
@@ -39,6 +40,7 @@ def build_fallback_report(
     clip_id: str,
     frame_range: tuple[int, int],
     fixture_source: str,
+    trip_reason: str | None = None,
 ) -> IncidentReport:
     label = evidence.label
     zone = "unknown zone" if evidence.zone is None else f"Zone {evidence.zone}"
@@ -53,11 +55,12 @@ def build_fallback_report(
         timestamp=incident_time,
         suspected_origin=origin,
         physical_evidence=evidence,
-        deterministic_actions_taken=actions,
+        deterministic_actions_taken=list(actions),
         recommended_operator_action=_RECOMMENDATIONS.get(
             label, "Review the incident log and confirm the branch state."
         ),
         report_source="deterministic_fallback",
+        trip_reason=trip_reason,
         config_hash=config_hash,
         clip_id=clip_id,
         frame_range=frame_range,

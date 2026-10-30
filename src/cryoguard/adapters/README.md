@@ -105,15 +105,45 @@ same clip byte-identical (T-DET-01).
   and requeue on the standby node.
 - `tests/test_closed_loop.py` — the full sequence, clamp-failure HARD_TRIP,
   valve-fault HARD_TRIP, and FAILED_SAFE when the power cut also fails.
+- `tests/test_action_log.py` — append-only ordering, seal-after-close, and the
+  closed-incident file guard.
+- `tests/test_emergency.py` — R1 over in-memory ports and over real sockets.
+- `tests/test_watchdog.py` — the watchdog trips while the perception task is
+  gone, and an unreadable sensor fails safe.
 - `tests/test_architecture.py` — `adapters/` cannot import `report/` or
   `openai`.
+
+## Watchdog and the emergency path
+
+`orchestrator/watchdog.py` runs as its own asyncio task with its own period
+(`watchdog.period_ms`). It reads the GPU junction temperature through the NVML
+backend and never consumes a fusion decision, so cancelling perception cannot
+blind it.
+
+| Condition | Trip reason | Outcome |
+| :-- | :-- | :-- |
+| junction ≥ `thermal_model.watchdog_limit_c` (90 °C) | `JUNCTION_OVER_TEMP` | `EMERGENCY_TRIP` |
+| clamp readback failed | `CLAMP_READBACK_FAILED` | `EMERGENCY_TRIP` |
+| PLC fault coil asserted | `PLC_FAULT` | `EMERGENCY_TRIP` |
+| sensor read raised | `SENSOR_UNAVAILABLE` | `EMERGENCY_TRIP` |
+| valve `FAULT` during the sequence | same trigger | `HARD_TRIP` |
+| power cut rejected | same trigger | `FAILED_SAFE` |
+
+The limit is the same 90 °C knob the fusion thermal rule uses, validated to sit
+below `t_junction_max_c`. The R1 sequence (`orchestrator/emergency.py`) is valve
+close → scheduler cordon → power cut. It has no checkpoint wait and no requeue,
+and it seals its action log on every exit path.
 
 ## Known limits
 
 - `RealNvml` is not exercised in CI; this host has no NVIDIA device and
-  `pynvml` is not a required dependency.
+  `pynvml` is not a required dependency. The fake backend reports
+  `nvml.fake_junction_c` as its junction temperature.
 - The BMC mock has no TLS or authentication. `bmc.token_env` reads an optional
   token from the environment; no secret is stored in the repository.
-- The R1 emergency path and the independent thermal watchdog (P6-T07) are not
-  wired yet. The fault paths above are R1b-style hard trips inside the
-  confirmed-leak sequence.
+- The watchdog's hardware lanes are wired and tested with injected readings;
+  only the thermal lane is armed in the offline demo, because the demo has no
+  clamp failure or PLC fault to observe unless one is injected.
+- Actuation in the watchdog uses the same transport helpers as the pipeline, so
+  it is as real as the selected `protocol_mode`; the demo's loopback mode is
+  still SIMULATED.

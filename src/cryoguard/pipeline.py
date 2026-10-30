@@ -14,6 +14,7 @@ Order inside a tick matters:
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -40,13 +41,21 @@ from cryoguard.orchestrator.adapters import (
     SimulatedPlc,
     SimulatedScheduler,
 )
+from cryoguard.orchestrator.emergency import EmergencySequence
 from cryoguard.orchestrator.incident_fsm import ConfirmedLeakOrchestrator, SequenceStep
+from cryoguard.orchestrator.watchdog import (
+    NvmlJunctionSensor,
+    ThermalWatchdog,
+    TripRecord,
+    WatchdogTrip,
+)
 from cryoguard.perception.candidates import Candidate, CandidateManager
 from cryoguard.perception.health import assess_health
 from cryoguard.perception.sam_client import SamClient
 from cryoguard.perception.sam_worker import SamStats, SamWorker
 from cryoguard.perception.sampling import SamplingPolicy
 from cryoguard.report.fallback import build_fallback_report, scenario_clock
+from cryoguard.report.muse_client import MuseClient, MuseUnavailable
 from cryoguard.report.schema import ActionModel, EvidenceModel, IncidentReport
 from cryoguard.report.writer import write_incident
 from cryoguard.telemetry.replay import TelemetryReplay, TelemetrySample
@@ -149,7 +158,7 @@ def _action(
     )
 
 
-def _steps_to_actions(steps: list[SequenceStep]) -> list[ActionModel]:
+def _steps_to_actions(steps: Sequence[SequenceStep]) -> list[ActionModel]:
     """The orchestrator's executed steps are the only source of action records."""
 
     return [
@@ -222,9 +231,11 @@ def _run_live_sequence(
 
 
 async def _confirmed_leak_actions(
-    decision_t: float, cfg: dict[str, Any], checkpoint_dir: str | Path | None
+    decision_t: float,
+    cfg: dict[str, Any],
+    checkpoint_dir: str | Path | None,
+    mode: str,
 ) -> tuple[list[ActionModel], IncidentState]:
-    mode = str(cfg["orchestrator"]["protocol_mode"]).lower()
     if mode == "memory":
         return _run_memory_sequence(decision_t, cfg)
     if mode == "loopback":
@@ -247,21 +258,64 @@ async def _confirmed_leak_actions(
     )
 
 
+async def _emergency_actions(
+    t_s: float, cfg: dict[str, Any], reason: str, mode: str
+) -> tuple[list[ActionModel], IncidentState]:
+    """R1: valve, cordon, power cut - the same transports as every other path."""
+
+    mode = mode.lower()
+    if mode == "memory":
+        return await asyncio.to_thread(_run_emergency_memory, t_s, cfg, reason)
+    if mode == "loopback":
+        async with loopback_simulators(cfg) as endpoints:
+            return await asyncio.to_thread(_run_emergency_live, t_s, cfg, endpoints, reason)
+    if mode == "external":
+        return await asyncio.to_thread(
+            _run_emergency_live, t_s, cfg, SimEndpoints.from_config(cfg), reason
+        )
+    raise PipelineError(f"unknown orchestrator.protocol_mode {mode!r}")
+
+
+def _run_emergency_memory(
+    t_s: float, cfg: dict[str, Any], reason: str
+) -> tuple[list[ActionModel], IncidentState]:
+    result = EmergencySequence(
+        ScenarioClock(t_s),
+        SimulatedPlc(get(cfg, "plc.valve_travel_ms")),
+        SimulatedBmc(),
+        SimulatedScheduler(cfg["scheduler"]),
+    ).run(reason)
+    return _steps_to_actions(result.steps), result.state
+
+
+def _run_emergency_live(
+    t_s: float,
+    cfg: dict[str, Any],
+    endpoints: SimEndpoints,
+    reason: str,
+) -> tuple[list[ActionModel], IncidentState]:
+    result = EmergencySequence(
+        ScenarioClock(t_s),
+        PlcClient(cfg["plc"], host=endpoints.plc_host, port=endpoints.plc_port),
+        RedfishClient(cfg["bmc"], base_url=endpoints.bmc_url),
+        SchedulerAdapter(cfg["scheduler"]),
+    ).run(reason)
+    return _steps_to_actions(result.steps), result.state
+
+
 async def _actions_for(
-    decision: Decision, t_s: float, cfg: dict[str, Any], checkpoint_dir: str | Path | None
+    decision: Decision,
+    t_s: float,
+    cfg: dict[str, Any],
+    checkpoint_dir: str | Path | None,
+    protocol: str,
 ) -> tuple[list[ActionModel], IncidentState | None]:
     if decision.label is SystemLabel.CONFIRMED_LEAK:
-        return await _confirmed_leak_actions(t_s, cfg, checkpoint_dir)
+        return await _confirmed_leak_actions(t_s, cfg, checkpoint_dir, protocol)
 
     if decision.label is SystemLabel.EMERGENCY_TRIP:
-        return (
-            [
-                _action(1, t_s, "PLC", "VALVE_CLOSE", "COMMANDED", "spring-return close, no wait"),
-                _action(2, t_s, "BMC", "FORCE_OFF", "COMMANDED", "checkpoint wait aborted"),
-                _action(3, t_s, "SLURM", "SCHEDULER_DRAIN", "COMMANDED", ""),
-            ],
-            None,
-        )
+        # R1: no checkpoint wait and no requeue. The hardware condition is the trigger.
+        return await _emergency_actions(t_s, cfg, f"{decision.rule_id}: emergency trip", protocol)
 
     if decision.label is SystemLabel.HIDDEN_HYDRAULIC_EVENT:
         drained = SimulatedScheduler(cfg["scheduler"]).drain()
@@ -295,6 +349,15 @@ def _build_sam_worker(
     client = SamClient(cfg["sam"], mode=mode, cache_dir=cache_dir)
     worker = SamWorker(client, topology, cfg["sam"], px_per_mm, canvas, fps)
     return worker, client
+
+
+def _junction_of(watchdog: ThermalWatchdog) -> float | None:
+    """Best-effort display value; the trip itself is already recorded."""
+
+    try:
+        return float(watchdog.sensor.read().junction_c)
+    except Exception:
+        return None
 
 
 async def run_scenario(
@@ -337,6 +400,41 @@ async def run_scenario(
     ticks = 0
     next_tick_t = 0.0
     hydraulic_since: float | None = None
+    last_t_s = 0.0
+
+    watchdog: ThermalWatchdog | None = None
+    watchdog_task: asyncio.Task[TripRecord | None] | None = None
+    watchdog_stop = asyncio.Event()
+    emergency_actions: list[ActionModel] = []
+    emergency_state: IncidentState | None = None
+    emergency_reason: str | None = None
+    last_evidence: Evidence | None = None
+    last_sample: TelemetrySample | None = None
+    last_candidate: Candidate | None = None
+    last_index = 0
+
+    if bool(get(cfg, "watchdog.enabled")):
+        sensor = NvmlJunctionSensor(
+            build_nvml(
+                cfg["nvml"],
+                tolerance_w=float(get(cfg, "orchestrator.clamp_tolerance_w")),
+            )
+        )
+
+        async def actuate(reason: WatchdogTrip, detail: str) -> None:
+            nonlocal emergency_actions, emergency_state, emergency_reason
+            emergency_reason = reason.value
+            emergency_actions, emergency_state = await _emergency_actions(
+                last_t_s, cfg, detail, protocol
+            )
+
+        watchdog = ThermalWatchdog(
+            sensor,
+            limit_c=float(get(cfg, "thermal_model.watchdog_limit_c")),
+            period_s=float(get(cfg, "watchdog.period_ms")) / 1000.0,
+            actuate=actuate,
+        )
+        watchdog_task = asyncio.create_task(watchdog.run(watchdog_stop))
 
     with VideoSource(clip) as source:
         first = source.read(0)
@@ -417,20 +515,34 @@ async def run_scenario(
                 )
                 decision = engine.update(evidence, frame.t_s)
                 last_decision = decision
+                last_t_s = frame.t_s
+                last_evidence = evidence
+                last_sample = sample
+                last_candidate = chosen
+                last_index = frame.index
                 ticks += 1
 
                 hz = policy.update(decision.label, chosen is not None)
                 next_tick_t = frame.t_s + 1.0 / hz
 
-                if decision.label in INCIDENT_LABELS:
+                # Hand the loop to the watchdog task. It is not fed by this loop:
+                # it reads the GPU itself and can trip while perception is stalled.
+                await asyncio.sleep(0)
+                if watchdog is not None and watchdog.actuated:
+                    assert watchdog.trip is not None
                     return await _finish(
                         name=name,
                         scenario=scenario,
                         cfg=cfg,
                         decision=decision,
+                        label=SystemLabel.EMERGENCY_TRIP,
                         evidence=evidence,
                         sample=sample,
                         candidate=chosen,
+                        actions=emergency_actions,
+                        sequence_state=emergency_state,
+                        trip_reason=emergency_reason,
+                        junction_c=_junction_of(watchdog),
                         sam_mode=mode,
                         sam_stats=worker.stats if worker is not None else None,
                         ticks=ticks,
@@ -440,11 +552,78 @@ async def run_scenario(
                         tick_rate_hz=policy.hz,
                         rate_changes=policy.changes,
                         protocol_mode=protocol,
-                        checkpoint_dir=checkpoint_dir,
+                    )
+
+                if decision.label in INCIDENT_LABELS:
+                    actions, sequence_state = await _actions_for(
+                        decision, frame.t_s, cfg, checkpoint_dir, protocol
+                    )
+                    return await _finish(
+                        name=name,
+                        scenario=scenario,
+                        cfg=cfg,
+                        decision=decision,
+                        label=decision.label,
+                        evidence=evidence,
+                        sample=sample,
+                        candidate=chosen,
+                        actions=actions,
+                        sequence_state=sequence_state,
+                        trip_reason=None,
+                        junction_c=None,
+                        sam_mode=mode,
+                        sam_stats=worker.stats if worker is not None else None,
+                        ticks=ticks,
+                        frame_range=(0, frame.index),
+                        frames=frame.index + 1,
+                        out_dir=out_dir,
+                        tick_rate_hz=policy.hz,
+                        rate_changes=policy.changes,
+                        protocol_mode=protocol,
                     )
         finally:
+            watchdog_stop.set()
+            if watchdog_task is not None:
+                try:
+                    await asyncio.wait_for(watchdog_task, timeout=5.0)
+                except TimeoutError:
+                    watchdog_task.cancel()
             if worker is not None:
                 await worker.close()
+
+    # The clip can end before a real-socket emergency sequence finishes. The
+    # actions already ran; finish the filing so the trip is never lost.
+    if (
+        watchdog is not None
+        and watchdog.actuated
+        and last_evidence is not None
+        and last_sample is not None
+        and last_decision is not None
+    ):
+        assert watchdog.trip is not None
+        return await _finish(
+            name=name,
+            scenario=scenario,
+            cfg=cfg,
+            decision=last_decision,
+            label=SystemLabel.EMERGENCY_TRIP,
+            evidence=last_evidence,
+            sample=last_sample,
+            candidate=last_candidate,
+            actions=emergency_actions,
+            sequence_state=emergency_state,
+            trip_reason=emergency_reason,
+            junction_c=_junction_of(watchdog),
+            sam_mode=mode,
+            sam_stats=worker.stats if worker is not None else None,
+            ticks=ticks,
+            frame_range=(0, last_index),
+            frames=last_index + 1,
+            out_dir=out_dir,
+            tick_rate_hz=policy.hz,
+            rate_changes=policy.changes,
+            protocol_mode=protocol,
+        )
 
     return RunResult(
         scenario=resolve_scenario(name),
@@ -461,15 +640,70 @@ async def run_scenario(
     )
 
 
+async def _explained_report(
+    *,
+    report: IncidentReport,
+    cfg: dict[str, Any],
+    evidence: EvidenceModel,
+    actions: list[ActionModel],
+    label: str,
+    fixture_source: str,
+    trip_reason: str | None,
+) -> IncidentReport:
+    """Ask Muse after the incident is sealed. Any failure keeps the fallback.
+
+    NFR-SAF-01: the model only fills ``root_cause_explanation`` and
+    ``llm_uncertainty``. It cannot change the actions, the evidence, or the
+    recommended operator action, and it cannot raise into the caller.
+    """
+
+    section = cfg.get("report", {})
+    if not bool(section.get("enabled", True)):
+        return report
+
+    client = MuseClient(section)
+    if not client.available:
+        return report
+
+    try:
+        result = await client.explain(
+            incident_id=report.incident_id,
+            label=label,
+            evidence=evidence,
+            actions=actions,
+            fixture_source=fixture_source,
+            trip_reason=trip_reason,
+        )
+    except MuseUnavailable:
+        return report
+    except Exception:
+        # A report-service bug must not turn an incident into a crash.
+        return report
+
+    return report.model_copy(
+        update={
+            "report_source": "llm",
+            "root_cause_explanation": result.body.root_cause,
+            "llm_uncertainty": result.body.uncertainty,
+            "llm_model": result.model,
+        }
+    )
+
+
 async def _finish(
     *,
     name: str,
     scenario: dict[str, Any],
     cfg: dict[str, Any],
     decision: Decision,
+    label: SystemLabel,
     evidence: Evidence,
     sample: TelemetrySample,
     candidate: Candidate | None,
+    actions: list[ActionModel],
+    sequence_state: IncidentState | None,
+    trip_reason: str | None,
+    junction_c: float | None,
     sam_mode: str,
     sam_stats: SamStats | None,
     ticks: int,
@@ -479,17 +713,15 @@ async def _finish(
     tick_rate_hz: float,
     rate_changes: int,
     protocol_mode: str,
-    checkpoint_dir: str | Path | None,
 ) -> RunResult:
     fixture_source = scenario.get("provenance", "synthetic")
     if fixture_source not in ("synthetic", "capture"):
         raise PipelineError(f"scenario provenance must be synthetic or capture: {fixture_source}")
 
-    actions, sequence_state = await _actions_for(decision, sample.t_s, cfg, checkpoint_dir)
     incident_time = _incident_time(cfg, sample.t_s)
 
     evidence_model = EvidenceModel(
-        label=decision.label.value,
+        label=label.value,
         zone=candidate.zone if candidate is not None else None,
         qd_origin=str(scenario["expected"]["qd"]),
         p_leak=decision.p,
@@ -505,6 +737,7 @@ async def _finish(
         flow_imbalance_lpm=sample.flow_imbalance_lpm,
         surface_c=sample.surface_c,
         dew_point_c=sample.dew_point_c,
+        junction_c=junction_c,
     )
 
     report = build_fallback_report(
@@ -517,6 +750,16 @@ async def _finish(
         clip_id=resolve_scenario(name),
         frame_range=frame_range,
         fixture_source=fixture_source,
+        trip_reason=trip_reason,
+    )
+    report = await _explained_report(
+        report=report,
+        cfg=cfg,
+        evidence=evidence_model,
+        actions=actions,
+        label=label.value,
+        fixture_source=fixture_source,
+        trip_reason=trip_reason,
     )
 
     directory = Path(out_dir) if out_dir is not None else ROOT / str(get(cfg, "demo.out_dir"))

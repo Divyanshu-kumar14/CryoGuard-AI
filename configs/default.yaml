@@ -138,11 +138,17 @@ orchestrator:
   checkpoint_dir: "artifacts/checkpoints/demo"
   checkpoint_step: 4200
   bmc_graceful_timeout_ms: 10000
-  watchdog_period_ms: 100
+
+watchdog:
+  enabled: true
+  period_ms: 100              # its own task, independent of the fusion loop
+  # The limit is thermal_model.watchdog_limit_c (90 C), which is validated to
+  # sit below thermal_model.t_junction_max_c. One knob, no duplicate literal.
 
 nvml:
   backend: "fake"
   fake_min_limit_w: 200.0
+  fake_junction_c: 42.0       # SIMULATED GPU temperature; the fake sensor never runs hot
   fake_num_gpus: 4
 
 plc:
@@ -187,12 +193,17 @@ scheduler:
   checkpoint_every_s: 10.0
 
 report:
+  enabled: true                # attempt Muse only when MUSE_API_KEY is present
   provider: "baseten"
   model: "meta-models/muse-spark-open-1026"
   base_url: "https://inference.baseten.co/v1"
+  api_key_env: "MUSE_API_KEY"  # secret only via the environment
   timeout_ms: 15000
   max_retries: 1
-  fallback_enabled: true
+  max_tokens: 600
+  prompts: "configs/prompts.yaml"
+  proof_log: "artifacts/open_weights_proof.jsonl"
+  # The deterministic fallback is unconditional (NFR-SAF-01): it is not a toggle.
 
 bench:
   split: "test"

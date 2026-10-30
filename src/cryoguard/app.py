@@ -90,6 +90,7 @@ def main(argv: list[str] | None = None) -> int:
     if result.sequence_state is not None:
         print(f"sequence  {result.sequence_state.value}")
     print(f"actions   {len(result.report.deterministic_actions_taken)}")
+    print(f"report    {result.report.report_source}")
     print(f"incident  {result.path}")
     return 0
 

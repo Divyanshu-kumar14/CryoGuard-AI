@@ -18,9 +18,11 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from cryoguard.models import IncidentState, ValveStatus
+from cryoguard.orchestrator.actions import ActionLog, Clock, SequenceStep
 
 TERMINAL = {
     IncidentState.RESOLVED_PENDING_REPAIR,
+    IncidentState.EMERGENCY_TRIP,
     IncidentState.HARD_TRIP,
     IncidentState.FAILED_SAFE,
 }
@@ -79,11 +81,6 @@ class IncidentFSM:
         raise KeyError(event)
 
 
-class Clock(Protocol):
-    def now(self) -> float: ...
-    def advance(self, seconds: float) -> float: ...
-
-
 class NvmlPort(Protocol):
     def clamp(self) -> ClampResult: ...
 
@@ -139,17 +136,6 @@ class CheckpointResult:
     verified: bool = True
 
 
-@dataclass(frozen=True)
-class SequenceStep:
-    """One executed action, in execution order, for the read-only incident log."""
-
-    ts: float
-    actor: str
-    command: str
-    status: str
-    detail: str = ""
-
-
 class ConfirmedLeakOrchestrator:
     """Runs the CONFIRMED_LEAK sequence in physical order (D-06)."""
 
@@ -170,12 +156,16 @@ class ConfirmedLeakOrchestrator:
         self.bmc = bmc
         self.scheduler = scheduler
         self.clamp_latency_ms = clamp_latency_ms
-        self.steps: list[SequenceStep] = []
+        self.log = ActionLog(clock)
+
+    @property
+    def steps(self) -> tuple[SequenceStep, ...]:
+        """Read-only view: the report service never gets the mutable log."""
+
+        return self.log.snapshot()
 
     def _record(self, actor: str, command: str, status: str, detail: str = "") -> SequenceStep:
-        step = SequenceStep(self.clock.now(), actor, command, status, detail)
-        self.steps.append(step)
-        return step
+        return self.log.append(actor, command, status, detail)
 
     def _power_cut(self, reason: str) -> PowerResult:
         power = self.bmc.force_off()
@@ -198,9 +188,17 @@ class ConfirmedLeakOrchestrator:
         self._record("SLURM", "SCHEDULER_DRAIN", "DRAINED", f"State={drain_state} (mock)")
 
     def run(self) -> IncidentFSM:
-        self.steps.clear()
+        """Run one incident; the log is sealed on every exit path, success or not."""
+
+        self.log = ActionLog(self.clock)
         fsm = IncidentFSM()
         fsm.fire("decision", self.clock.now())
+        try:
+            return self._sequence(fsm)
+        finally:
+            self.log.seal()
+
+    def _sequence(self, fsm: IncidentFSM) -> IncidentFSM:
 
         # Started first, settles independently - never blocks isolation. A corrupt
         # or missing checkpoint is a failed branch, not a reason to leave coolant

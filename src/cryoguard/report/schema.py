@@ -23,6 +23,14 @@ class SchemaModel(BaseModel):
 
 
 class ActionModel(SchemaModel):
+    # P6-T08: a closed incident's actions are evidence, not a working buffer.
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+        frozen=True,
+    )
+
     seq: int = Field(ge=1)
     t_s: float = Field(ge=0)
     actor: str
@@ -48,6 +56,7 @@ class EvidenceModel(SchemaModel):
     flow_imbalance_lpm: float
     surface_c: float
     dew_point_c: float
+    junction_c: float | None = None
 
 
 class IncidentReport(SchemaModel):
@@ -58,6 +67,10 @@ class IncidentReport(SchemaModel):
     deterministic_actions_taken: list[ActionModel]
     recommended_operator_action: str
     report_source: Literal["llm", "deterministic_fallback"]
+    root_cause_explanation: str | None = None
+    llm_uncertainty: str | None = None
+    llm_model: str | None = None
+    trip_reason: str | None = None
     config_hash: str
     clip_id: str
     frame_range: tuple[int, int]
