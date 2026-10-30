@@ -23,6 +23,7 @@ REQUIRED_SECTIONS = (
     "plc",
     "scheduler",
     "report",
+    "demo",
 )
 
 

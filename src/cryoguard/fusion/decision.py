@@ -51,7 +51,6 @@ def decide(ev: Evidence, cfg: dict[str, Any]) -> Decision:
         zone_ok
         and p >= thresholds["zone2_trip"]
         and ev.ticks >= rules["hysteresis_ticks"]
-        and ev.hold_ms >= rules["hold_ms"]["r1"]
         and quality_ok
         and growth_ok
     ):
@@ -61,6 +60,7 @@ def decide(ev: Evidence, cfg: dict[str, Any]) -> Decision:
     confirmable = (
         p >= thresholds["confirmed_leak"]
         and ev.zone in (0, 1)
+        and ev.ticks >= rules["hysteresis_ticks"]
         and ev.phi_v >= 0.2
         and ev.phi_h >= 0.2
         and quality_ok
@@ -89,7 +89,7 @@ def decide(ev: Evidence, cfg: dict[str, Any]) -> Decision:
         )
 
     # 7. R4 — hydraulic event with no visual evidence. Soft cordon only, never a valve (D-11).
-    if ev.phi_v <= 0.1 and ev.phi_h >= 0.6 and ev.hydraulic_low_ms >= rules["hold_ms"]["r4"]:
+    if ev.phi_v <= 0.1 and ev.phi_h >= 0.6 and ev.hydraulic_low_ms >= rules["hydraulic_hold_ms"]:
         return Decision("R4", SystemLabel.HIDDEN_HYDRAULIC_EVENT, ("ALERT", "SCHEDULER_DRAIN"), p)
 
     # 8. R3 — escalation band. PRD §6.3 is explicit: no actuation.

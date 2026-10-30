@@ -120,12 +120,14 @@ class ConfirmedLeakOrchestrator:
         plc: PlcPort,
         checkpoint: CheckpointPort,
         on_action: Callable[[str, str, float], None] | None = None,
+        clamp_latency_ms: float = 0.0,
     ) -> None:
         self.clock = clock
         self.nvml = nvml
         self.plc = plc
         self.checkpoint = checkpoint
         self.on_action = on_action or (lambda *_: None)
+        self.clamp_latency_ms = clamp_latency_ms
 
     def run(self) -> IncidentFSM:
         fsm = IncidentFSM()
@@ -140,6 +142,7 @@ class ConfirmedLeakOrchestrator:
         if not clamp.ok:
             fsm.fire("hard_trip", self.clock.now())
             return fsm
+        self.clock.advance(self.clamp_latency_ms / 1000.0)
         fsm.fire("clamp_verified", self.clock.now())
 
         valve = self.plc.close_valve()
@@ -150,6 +153,7 @@ class ConfirmedLeakOrchestrator:
         if valve.status is ValveStatus.FAULT:
             fsm.fire("failed_safe", self.clock.now())
             return fsm
+        self.clock.advance(valve.travel_ms / 1000.0)
         fsm.fire("valve_closed", self.clock.now())
 
         # Isolation is already achieved; the checkpoint gates the power-off below.

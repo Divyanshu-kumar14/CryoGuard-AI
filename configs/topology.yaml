@@ -20,21 +20,24 @@ chassis:
       - {id: 3, center_mm: [80, 320]}
 
 zones:
+  # The three polygons tile the face down to a 20 mm border. A leak in flight
+  # between the fitting and the busbar must never be in "no zone": that would
+  # silently drop the zone index the decision table depends on.
   - id: 0
     name: "Hydraulic origin"
-    polygon_mm: [[40, 60], [240, 60], [240, 220], [40, 220]]
+    polygon_mm: [[20, 20], [299, 20], [299, 240], [20, 240]]
   - id: 1
     name: "Containment buffer"
-    polygon_mm: [[20, 240], [280, 240], [280, 320], [20, 320]]
+    polygon_mm: [[20, 240], [299, 240], [299, 380], [20, 380]]
   - id: 2
     name: "Electrical hazard plane"
     margin_mm: 20
-    polygon_mm: [[300, 40], [580, 40], [580, 360], [300, 360]]
+    polygon_mm: [[300, 20], [580, 20], [580, 380], [300, 380]]
 
 qd:
   - id: "QD-04"
     branch: "BRANCH-SEC-02"
-    roi_mm: [60, 90, 140, 170]     # x0, y0, x1, y1
+    roi_mm: [155, 95, 235, 195]     # x0, y0, x1, y1
     zone: 0
 
 nodes:

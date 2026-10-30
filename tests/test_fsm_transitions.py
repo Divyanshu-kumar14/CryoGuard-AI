@@ -95,7 +95,7 @@ def test_isolation_does_not_wait_for_the_checkpoint() -> None:
     fsm = orch.run()
 
     assert fsm.timestamp("valve_closed") < fsm.timestamp("checkpoint_settled")
-    assert fsm.timestamp("valve_closed") == pytest.approx(0.0)
+    assert fsm.timestamp("valve_closed") == pytest.approx(0.95)  # one valve travel
     assert fsm.timestamp("power_off") == pytest.approx(30.0)
 
 

@@ -31,7 +31,10 @@ class Detection:
     area_mm2: float
     bbox_mm: tuple[float, float, float, float]
     mean_intensity: float
+    intensity_var: float
+    clipped_fraction: float
     compactness: float
+    solidity: float
     mask: np.ndarray
     offset_px: tuple[int, int]
 
@@ -43,7 +46,10 @@ class Track:
     area_mm2: float
     dA_dt_mm2_per_s: float
     mean_intensity: float
+    intensity_var: float
+    clipped_fraction: float
     compactness: float
+    solidity: float
     bbox_mm: tuple[float, float, float, float]
     mask: np.ndarray
     offset_px: tuple[int, int]
@@ -62,6 +68,24 @@ class Track:
         return f"T{self.track_id:02d} ({x:.1f},{y:.1f}) {self.area_mm2:.0f}mm2"
 
 
+def _solidity(component: np.ndarray) -> float:
+    """Area over convex-hull area: 1 for a filled blob, low for a spidery mask.
+
+    Compactness (4*pi*A/P^2) punishes elongation, which every leak with a wet
+    trail has. Solidity measures the property the quality gate actually cares
+    about: whether the mask is a coherent region rather than disconnected strands.
+    """
+
+    contours, _ = cv2.findContours(component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return 0.0
+    area = float(cv2.contourArea(contours[0]))
+    hull = float(cv2.contourArea(cv2.convexHull(contours[0])))
+    if hull <= 0.0:
+        return 0.0
+    return max(0.0, min(1.0, area / hull))
+
+
 def _compactness(component: np.ndarray) -> float:
     contours, _ = cv2.findContours(component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
@@ -78,6 +102,7 @@ class FastTracker:
         self.cfg = perception_cfg
         self._next_id = 1
         self._tracks: list[Track] = []
+        self.last_mask: np.ndarray | None = None
 
         self._kernel_open = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE,
@@ -126,6 +151,7 @@ class FastTracker:
             raise TrackerError(f"px_per_mm must be positive: {px_per_mm}")
 
         mask = self.mask_for(warped_bgr)
+        self.last_mask = mask
         detections = self._detections(mask, warped_bgr, px_per_mm)
         self._associate(detections, t_s)
 
@@ -147,7 +173,7 @@ class FastTracker:
 
             component = (labels[y : y + height, x : x + width] == label).astype(np.uint8)
             selected = component.astype(bool)
-            intensity = float(value[y : y + height, x : x + width][selected].mean())
+            intensities = value[y : y + height, x : x + width][selected].astype(np.float32) / 255.0
             cx, cy = centroids[label]
 
             found.append(
@@ -160,8 +186,11 @@ class FastTracker:
                         (x + width) * mm_per_px,
                         (y + height) * mm_per_px,
                     ),
-                    mean_intensity=intensity,
+                    mean_intensity=float(intensities.mean()),
+                    intensity_var=float(intensities.var()),
+                    clipped_fraction=float((intensities >= 250.0 / 255.0).mean()),
                     compactness=_compactness(component),
+                    solidity=_solidity(component),
                     mask=component.astype(bool),
                     offset_px=(x, y),
                 )
@@ -215,7 +244,10 @@ class FastTracker:
             area_mm2=det.area_mm2,
             dA_dt_mm2_per_s=0.0,
             mean_intensity=det.mean_intensity,
+            intensity_var=det.intensity_var,
+            clipped_fraction=det.clipped_fraction,
             compactness=det.compactness,
+            solidity=det.solidity,
             bbox_mm=det.bbox_mm,
             mask=det.mask,
             offset_px=det.offset_px,
@@ -230,7 +262,10 @@ class FastTracker:
         track.centroid_mm = det.centroid_mm
         track.area_mm2 = det.area_mm2
         track.mean_intensity = det.mean_intensity
+        track.intensity_var = det.intensity_var
+        track.clipped_fraction = det.clipped_fraction
         track.compactness = det.compactness
+        track.solidity = det.solidity
         track.bbox_mm = det.bbox_mm
         track.mask = det.mask
         track.offset_px = det.offset_px

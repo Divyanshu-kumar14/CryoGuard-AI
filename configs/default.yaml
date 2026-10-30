@@ -8,7 +8,8 @@ system:
   rack_id: "RACK-08B"
   branch_id: "BRANCH-SEC-02"
   sampling_rate_hz: 5          # NFR-LAT-01: decision tick is fixed at 5 Hz
-  camera_source: "fixtures/videos/scenario_01_active_leak.mp4"
+  camera_source: "fixtures/videos/simulated/sim_leak_qd4.mp4"
+  incident_epoch: "2026-10-30T00:00:00Z"   # scenario time; keeps reruns byte-identical
   rectify_enabled: true
   allow_uncalibrated: false    # delta C-07: identity homography is dev-only
   maintenance_mode: false      # Zone 2 is never suppressed (FR-DEC-05)
@@ -39,8 +40,9 @@ perception:
   max_area_mm2: 5000.0
   link_radius_mm: 25.0
   candidate_ttl_ticks: 3       # FR-PER-05: shorter-lived candidates are GLINT_NOISE
-  compactness_ref: 0.6
+  solidity_ref: 0.6            # area / convex hull; robustness to a wet trail
   q_min: 0.5                   # mask quality gate for R1/R2
+  wetness_ticks: 3             # FR-FUS-05: continuous path to the QD ROI
 
 sam:
   model: "sam-3.1"
@@ -109,10 +111,7 @@ fusion:
 
 decision:
   hysteresis_ticks: 3
-  hold_ms:
-    r1: 600
-    r2: 600
-    r4: 3000
+  hydraulic_hold_ms: 3000       # R4 needs 3 s of hydraulic-only evidence
   deescalation_ticks: 5
   deescalation_ms: 1500
   growth_epsilon_mm2_per_s: 0.5   # delta R-1: a static reflection must not trip
@@ -123,6 +122,7 @@ decision:
     electrical: 2
 
 orchestrator:
+  clamp_latency_ms: 40
   clamp_readback_timeout_ms: 2000
   clamp_tolerance_w: 5.0
   valve_verified_ms: 1200
@@ -170,3 +170,7 @@ bench:
   repeats: 3
   confidence: 0.95
   seed: 427
+
+demo:
+  run_index: 1                 # base; a fixed scenario offset is added (01..04)
+  out_dir: "artifacts/incidents"

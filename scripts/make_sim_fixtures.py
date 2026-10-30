@@ -56,17 +56,43 @@ def base_scene(topology: dict, px_per_mm: float) -> np.ndarray:
 
 
 def add_fluorescence(
-    scene: np.ndarray, center_mm: tuple[float, float], radius_mm: float, px_per_mm: float
+    scene: np.ndarray,
+    center_mm: tuple[float, float],
+    radius_mm: float,
+    px_per_mm: float,
+    origin_mm: tuple[float, float] | None = None,
 ) -> np.ndarray:
-    """Bright core plus a soft glow, the way a tracer bloom looks through a filter."""
+    """Bright core, a wet trail back to the fitting, and a soft glow.
 
-    layer = np.zeros_like(scene)
+    The trail matters: FR-FUS-05 requires a continuous path to the QD ROI, and a
+    leak that has moved away from its fitting still has one.
+    """
+
+    core = np.zeros_like(scene)
     center_px = (int(center_mm[0] * px_per_mm), int(center_mm[1] * px_per_mm))
     radius_px = max(1, int(radius_mm * px_per_mm))
-    cv2.circle(layer, center_px, radius_px, (0, 220, 40), -1, lineType=cv2.LINE_AA)
-    glow = cv2.GaussianBlur(layer, (0, 0), max(1.0, radius_px * 0.7))
-    scene = cv2.addWeighted(scene, 1.0, glow, 0.85, 0.0)
-    return cv2.addWeighted(scene, 1.0, layer, 0.9, 0.0)
+    if origin_mm is not None:
+        origin_px = (int(origin_mm[0] * px_per_mm), int(origin_mm[1] * px_per_mm))
+        cv2.line(
+            core,
+            origin_px,
+            center_px,
+            (0, 220, 40),
+            max(2, radius_px // 2),
+            lineType=cv2.LINE_AA,
+        )
+    cv2.circle(core, center_px, radius_px, (0, 220, 40), -1, lineType=cv2.LINE_AA)
+
+    # Halo first, then replace the core. An additive blend would push every
+    # channel to 255 on the white marker quiet zone and the tracer would vanish
+    # exactly where the QD sits.
+    glow = cv2.GaussianBlur(core, (0, 0), max(1.0, radius_px * 0.7))
+    scene = cv2.addWeighted(scene, 1.0, glow, 0.45, 0.0)
+
+    covered = core.any(axis=2)
+    mixed = (0.85 * core.astype(np.float32) + 0.15 * scene.astype(np.float32)).astype(np.uint8)
+    scene[covered] = mixed[covered]
+    return scene
 
 
 def add_bead(
@@ -110,8 +136,8 @@ def render_clip(
         if name == "sim_leak_qd4":
             # 3 -> 15 mm radius, drifting from QD-04 (x=100) into the electrical plane (x>=300).
             radius = 3.0 + 0.6 * t
-            center = (100.0 + 11.0 * t, 130.0 + 1.0 * t)
-            scene = add_fluorescence(scene, center, radius, px_per_mm)
+            center = (195.0 + 11.0 * t, 145.0 + 1.0 * t)
+            scene = add_fluorescence(scene, center, radius, px_per_mm, origin_mm=(195.0, 145.0))
 
         elif name == "sim_condensation":
             for bead in range(6):

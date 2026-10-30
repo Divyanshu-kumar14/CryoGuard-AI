@@ -72,7 +72,6 @@ def test_static_reflection_scores_above_trip_threshold_but_never_actuates(cfg) -
         dA_dt=0.0,
         q=1.0,
         ticks=50,
-        hold_ms=5000,
     )
     decision = decide(ev, cfg)
 
@@ -93,7 +92,6 @@ def test_identical_evidence_with_real_growth_trips_zone_two(cfg) -> None:
         dA_dt=2.0,
         q=1.0,
         ticks=50,
-        hold_ms=5000,
     )
     decision = decide(ev, cfg)
 
@@ -122,7 +120,6 @@ def test_confirmed_leak_scenario_reaches_r2_with_fixture_telemetry(cfg) -> None:
         dA_dt=1.2,
         q=0.95,
         ticks=10,
-        hold_ms=2000,
     )
     decision = decide(ev, cfg)
 
@@ -142,7 +139,6 @@ def test_hidden_hydraulic_event_drains_and_never_touches_the_valve(cfg) -> None:
         dA_dt=0.0,
         q=1.0,
         ticks=10,
-        hold_ms=3000,
         hydraulic_low_ms=3000,
     )
     decision = decide(ev, cfg)
@@ -165,7 +161,6 @@ def test_blind_camera_is_never_reported_as_nominal(cfg) -> None:
         dA_dt=0.0,
         camera_healthy=False,
         ticks=100,
-        hold_ms=10000,
     )
     decision = decide(ev, cfg)
 
@@ -177,7 +172,7 @@ def test_blind_camera_is_never_reported_as_nominal(cfg) -> None:
 def test_observational_responses_are_not_actuation(cfg) -> None:
     """A 10 Hz sample request is not hardware movement, and must not be counted as one."""
 
-    ev = Evidence(zone=0, phi_v=0.6, phi_h=0.2, phi_t=0.0, W=0.6, dA_dt=2.0, ticks=10, hold_ms=5000)
+    ev = Evidence(zone=0, phi_v=0.6, phi_h=0.2, phi_t=0.0, W=0.6, dA_dt=2.0, ticks=10)
     decision = decide(ev, cfg)
 
     assert decision.rule_id in {"R3", "R5"}
@@ -197,7 +192,6 @@ def test_hysteresis_cannot_be_bypassed_by_a_drain(cfg) -> None:
         dA_dt=2.0,
         q=1.0,
         ticks=1,
-        hold_ms=5000,
     )
     decision = decide(ev, cfg)
 
@@ -224,7 +218,6 @@ def test_only_a_confirmed_leak_or_electrical_breach_moves_hardware(cfg) -> None:
                         dA_dt=2.0,
                         q=1.0,
                         ticks=10,
-                        hold_ms=5000,
                         hydraulic_low_ms=5000,
                     )
                     decision = decide(ev, cfg)
@@ -253,7 +246,6 @@ def test_every_evidence_point_maps_to_exactly_one_rule(cfg) -> None:
                         W=wet,
                         dA_dt=2.0,
                         ticks=10,
-                        hold_ms=5000,
                         hydraulic_low_ms=5000,
                     )
                     decision = decide(ev, cfg)

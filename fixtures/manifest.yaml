@@ -31,7 +31,7 @@
       "qd_origin": "QD-04",
       "expected_zone": 2,
       "split": "dev",
-      "sha256": "7f47bc5366c4d92364c29f53404086968db50711ec44c2cc204c32a6b7831865",
+      "sha256": "1cd4fd56b091114a464654e7b86509ea43b7a46ae60d7e678adf790d067c7787",
       "notes": "growing fluorescent leak from QD-04 into Zone 2"
     },
     {
@@ -51,7 +51,7 @@
       "qd_origin": "QD-04",
       "expected_zone": 1,
       "split": "dev",
-      "sha256": "7d5880b7c336be245b9c9234a265178ef81d4d8aae9787da748ba01a912c6f70",
+      "sha256": "0b435398c3c65fd9469e14a0b1dba0d875b027bb3ec6307f5dde187ecb21e203",
       "notes": "desaturated beads, no fluorescence"
     },
     {
@@ -71,7 +71,7 @@
       "qd_origin": "QD-04",
       "expected_zone": 2,
       "split": "test",
-      "sha256": "b394bb04a36cb20fb88f932750b828ff58c631de10819139b854ba07f7964b5b",
+      "sha256": "473ca48e62f11f7598b3479382ef09e6477ea2f97a92c94671088da462e87617",
       "notes": "white specular glints plus a 2-frame saturated blink"
     },
     {
@@ -91,7 +91,7 @@
       "qd_origin": "QD-04",
       "expected_zone": 0,
       "split": "test",
-      "sha256": "5a9cb685c3e3b118464d8ae0e6dd598c53f80df1871ad15c89fcfd883b5aceda",
+      "sha256": "41aacbaca0b19a611f1e791fdf8b8df79bdf61dd5e9335f768ea474952ad2a2f",
       "notes": "dark wet patch, no visual evidence"
     }
   ]

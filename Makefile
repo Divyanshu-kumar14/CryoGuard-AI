@@ -2,6 +2,8 @@ PY := .venv/bin/python
 RUFF := .venv/bin/ruff
 MYPY := .venv/bin/mypy
 
+SCENARIO ?= leak
+
 .PHONY: setup lint format typecheck test check export fixtures probe
 
 ## Create the pinned environment from uv.lock. uv owns the venv; .python-version pins 3.11.
@@ -36,3 +38,7 @@ fixtures:
 ## Measure the tracker on one clip, e.g. make probe CLIP=fixtures/videos/simulated/sim_leak_qd4.mp4
 probe:
 	PYTHONPATH=src $(PY) scripts/probe_clip.py $(CLIP)
+
+## End-to-end vertical slice: clip -> incident JSON.
+demo:
+	PYTHONPATH=src $(PY) -m cryoguard.app --scenario $(SCENARIO) --headless

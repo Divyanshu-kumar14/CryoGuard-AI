@@ -42,7 +42,7 @@ def test_single_blob_area_and_centroid(tracker: FastTracker) -> None:
     assert track.centroid_mm == pytest.approx((150.0, 120.0), abs=1.5)
     assert 250.0 <= track.area_mm2 <= 360.0  # pi*10^2 = 314
     assert track.compactness > 0.7
-    assert track.mean_intensity > 200.0
+    assert track.mean_intensity > 0.8
 
 
 def test_growth_rate_is_measured_not_assumed(tracker: FastTracker) -> None:

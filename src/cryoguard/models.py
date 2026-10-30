@@ -66,7 +66,6 @@ class Evidence:
     clamp_readback_ok: bool = True
     maintenance: bool = False
     ticks: int = 3
-    hold_ms: int = 1000
     hydraulic_low_ms: int = 0
 
 
