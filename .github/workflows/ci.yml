@@ -1,0 +1,19 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install the pinned environment
+        run: uv sync --all-extras --frozen
+      - name: Lint, types, tests
+        run: make check
+      - name: Benchmark drift
+        run: make bench-check

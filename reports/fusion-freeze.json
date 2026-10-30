@@ -6,7 +6,7 @@
     "max_frame_age_s": 0.1,
     "saturation_max": 0.35
   },
-  "config_hash": "0c00436e4913e420",
+  "config_hash": "de5bd0f0d16e7607",
   "decision": {
     "benign_phi_h_max": 0.1,
     "deescalation_ticks": 5,
@@ -19,7 +19,7 @@
       "origin": 0
     }
   },
-  "frozen_at": "2026-10-30T15:27:14.408Z",
+  "frozen_at": "2026-10-30T15:37:28.227Z",
   "fusion": {
     "hydraulic": {
       "flow_imbalance_ref_lpm": 0.5,

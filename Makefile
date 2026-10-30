@@ -3,6 +3,7 @@ RUFF := .venv/bin/ruff
 MYPY := .venv/bin/mypy
 
 SCENARIO ?= leak
+SPLIT ?= all
 
 .PHONY: setup lint format typecheck test check export fixtures probe
 
@@ -46,6 +47,20 @@ demo:
 ## Start the SIMULATED PLC (Modbus-TCP 5020) and BMC (Redfish 8443).
 sims:
 	PYTHONPATH=src $(PY) -m cryoguard.sims.run
+
+## Deterministic offline benchmark over every manifest clip (P8).
+bench:
+	PYTHONPATH=src $(PY) -m cryoguard.bench --split $(SPLIT)
+
+## Re-run the benchmark and fail if the committed runHash or rows drifted.
+bench-check:
+	PYTHONPATH=src $(PY) -m cryoguard.bench --split $(SPLIT) --check
+
+## Seed the deterministic SAM cache (fixture provenance, never a hosted call).
+seed-sam:
+	for s in leak condensation glint hidden; do \
+		PYTHONPATH=src $(PY) scripts/seed_sam_cache.py --scenario $$s; \
+	done
 
 ## Emit deterministic training checkpoints for the checkpoint gate.
 checkpoints:

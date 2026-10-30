@@ -58,14 +58,19 @@ def seed_fixture_cache(
             for roi in rois:
                 crop = np.ascontiguousarray(roi.crop(warped))
                 mask = tracker.mask_for(crop) > 0
+                key = cache_key(encode_png(crop), prompt, str(sam_cfg["model"]))
+                shape = (int(crop.shape[0]), int(crop.shape[1]))
+
                 if not mask.any():
+                    # A negative frame is part of the fixture too: store the empty
+                    # mask so the cache path never misses on a benign clip.
+                    client.store(key, prompt, (), "fixture", shape)
+                    written += 1
                     continue
 
                 ys, xs = np.nonzero(mask)
                 bbox = (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
                 sam_mask = SamMask(mask=mask, bbox_px=bbox, score=1.0)
-                key = cache_key(encode_png(crop), prompt, str(sam_cfg["model"]))
-                shape = (int(crop.shape[0]), int(crop.shape[1]))
                 client.store(key, prompt, (sam_mask,), "fixture", shape)
                 written += 1
 

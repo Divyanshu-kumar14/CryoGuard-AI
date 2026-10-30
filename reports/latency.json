@@ -1,0 +1,133 @@
+{
+  "configHash": "de5bd0f0d16e7607",
+  "deterministic": false,
+  "gitSha": "90ac543",
+  "note": "Wall-clock samples from one local run. They are measured, not assumed, and are excluded from benchmark.json so that file stays reproducible.",
+  "perClip": [
+    {
+      "clipId": "sim_leak_qd4",
+      "fusionMs": {
+        "median": 0.05591200169874355,
+        "n": 75,
+        "p95": 0.0701253014995018
+      },
+      "perceptionTickMs": {
+        "median": 18.029216000286397,
+        "n": 75,
+        "p95": 29.654772501089603
+      },
+      "samCachedMs": {
+        "median": 7.139252998968004,
+        "n": 8,
+        "p95": 9.669301898429694
+      },
+      "samLiveMs": {
+        "median": null,
+        "n": 0,
+        "p95": null
+      },
+      "sequenceMs": 0.22668699966743588
+    },
+    {
+      "clipId": "sim_condensation",
+      "fusionMs": {
+        "median": 0.06018849853717256,
+        "n": 40,
+        "p95": 0.07246165059768828
+      },
+      "perceptionTickMs": {
+        "median": 19.09082349811797,
+        "n": 40,
+        "p95": 27.48372990226926
+      },
+      "samCachedMs": {
+        "median": 4.540955500488053,
+        "n": 20,
+        "p95": 6.294808949678554
+      },
+      "samLiveMs": {
+        "median": null,
+        "n": 0,
+        "p95": null
+      },
+      "sequenceMs": 0.0
+    },
+    {
+      "clipId": "sim_glint",
+      "fusionMs": {
+        "median": 0.05624599907605443,
+        "n": 100,
+        "p95": 0.07453525140590499
+      },
+      "perceptionTickMs": {
+        "median": 17.295870500674937,
+        "n": 100,
+        "p95": 24.94660339743859
+      },
+      "samCachedMs": {
+        "median": 4.486877000090317,
+        "n": 20,
+        "p95": 6.548215799921309
+      },
+      "samLiveMs": {
+        "median": null,
+        "n": 0,
+        "p95": null
+      },
+      "sequenceMs": 0.0
+    },
+    {
+      "clipId": "sim_hidden_hydraulic",
+      "fusionMs": {
+        "median": 0.05689799945685081,
+        "n": 8,
+        "p95": 0.06871934965602121
+      },
+      "perceptionTickMs": {
+        "median": 19.78061699992395,
+        "n": 8,
+        "p95": 21.570088001499244
+      },
+      "samCachedMs": {
+        "median": 4.448774499905994,
+        "n": 4,
+        "p95": 5.450809900503373
+      },
+      "samLiveMs": {
+        "median": null,
+        "n": 0,
+        "p95": null
+      },
+      "sequenceMs": 0.09426899850950576
+    }
+  ],
+  "runHash": "76edbee924a65714060ed962142d09c6e061cf086fca5fba27a66119c00b3aab",
+  "schemaVersion": "1.0",
+  "stages": {
+    "fusionMs": {
+      "median": 0.05630499799735844,
+      "n": 223,
+      "p95": 0.07263339866767637
+    },
+    "perceptionTickMs": {
+      "median": 18.029216000286397,
+      "n": 223,
+      "p95": 27.574916198864226
+    },
+    "samCachedMs": {
+      "median": 4.606113499903586,
+      "n": 52,
+      "p95": 7.655774599879804
+    },
+    "samLiveMs": {
+      "median": null,
+      "n": 0,
+      "p95": null
+    },
+    "sequenceMs": {
+      "median": 0.16047799908847082,
+      "n": 2,
+      "p95": 0.22006609960953938
+    }
+  }
+}

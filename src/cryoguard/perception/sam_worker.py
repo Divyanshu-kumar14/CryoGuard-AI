@@ -12,8 +12,9 @@ those masks through ``FastTracker.reanchor``.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -72,6 +73,9 @@ class SamStats:
     failures: int = 0
     skipped: int = 0
     regions: int = 0
+    # Wall-clock samples for reports/latency.json; never part of a decision.
+    cached_ms: list[float] = field(default_factory=list)
+    live_ms: list[float] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -164,7 +168,9 @@ class SamWorker:
 
         if self.client.mode == "cache":
             # A miss must surface now, not inside a task nobody awaits.
+            started = time.perf_counter()
             result = self.client.segment(crop, self.prompt)
+            self.stats.cached_ms.append((time.perf_counter() - started) * 1000.0)
             self.stats.submitted += 1
             self._accept(roi, result, frame_index, t_s)
             return
@@ -175,6 +181,7 @@ class SamWorker:
         task.add_done_callback(self._tasks.discard)
 
     async def _run(self, roi: Roi, crop: np.ndarray, frame_index: int, t_s: float) -> None:
+        started = time.perf_counter()
         try:
             result = await asyncio.wait_for(
                 asyncio.to_thread(self.client.segment, crop, self.prompt),
@@ -185,6 +192,8 @@ class SamWorker:
             self._failures.append(SamFailure(roi.region_id, frame_index, t_s, repr(exc)))
             return
 
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        (self.stats.cached_ms if result.cached else self.stats.live_ms).append(elapsed_ms)
         self._accept(roi, result, frame_index, t_s)
 
     def _accept(self, roi: Roi, result: SamResult, frame_index: int, t_s: float) -> None:

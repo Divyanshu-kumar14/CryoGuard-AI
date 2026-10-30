@@ -84,9 +84,9 @@ def test_a_later_benchmark_must_post_date_the_freeze(freeze) -> None:
         pytest.skip("no benchmark yet; Phase 8 writes it")
 
     payload = json.loads(benchmark.read_text(encoding="utf-8"))
-    generated = payload.get("generated_at")
-    if not generated:
-        pytest.skip("benchmark has no generated_at")
+    generated = payload.get("generatedAt") or payload.get("generated_at")
+    assert generated, "benchmark has no generation timestamp"
+    assert payload.get("deterministic") is True
 
     frozen_at = datetime.fromisoformat(freeze["frozen_at"].replace("Z", "+00:00"))
     run_at = datetime.fromisoformat(str(generated).replace("Z", "+00:00"))

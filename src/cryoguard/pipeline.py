@@ -14,6 +14,7 @@ Order inside a tick matters:
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -98,6 +99,8 @@ class SamSummary:
     failures: int
     skipped: int
     regions: int
+    cached_ms: tuple[float, ...] = ()
+    live_ms: tuple[float, ...] = ()
 
     @classmethod
     def from_stats(cls, mode: str, stats: SamStats) -> SamSummary:
@@ -111,7 +114,18 @@ class SamSummary:
             failures=stats.failures,
             skipped=stats.skipped,
             regions=stats.regions,
+            cached_ms=tuple(stats.cached_ms),
+            live_ms=tuple(stats.live_ms),
         )
+
+
+@dataclass(frozen=True)
+class TimingSamples:
+    """Wall-clock samples (ms). Written to reports/latency.json, never benchmark.json."""
+
+    perception_ms: tuple[float, ...] = ()
+    fusion_ms: tuple[float, ...] = ()
+    sequence_ms: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -127,6 +141,7 @@ class RunResult:
     sam: SamSummary | None
     protocol_mode: str = "memory"
     sequence_state: IncidentState | None = None
+    timing: TimingSamples = TimingSamples()
 
 
 def resolve_scenario(name: str) -> str:
@@ -370,6 +385,7 @@ async def run_scenario(
     sam_cache_dir: str | Path | None = None,
     protocol_mode: str | None = None,
     checkpoint_dir: str | Path | None = None,
+    allow_llm: bool = True,
 ) -> RunResult:
     scenario = load_scenario(name)
     clip = ROOT / scenario["clip"]
@@ -412,6 +428,10 @@ async def run_scenario(
     last_sample: TelemetrySample | None = None
     last_candidate: Candidate | None = None
     last_index = 0
+    perception_ms: list[float] = []
+    fusion_ms: list[float] = []
+    sequence_ms = 0.0
+    emergency_ms = 0.0
 
     if bool(get(cfg, "watchdog.enabled")):
         sensor = NvmlJunctionSensor(
@@ -422,11 +442,13 @@ async def run_scenario(
         )
 
         async def actuate(reason: WatchdogTrip, detail: str) -> None:
-            nonlocal emergency_actions, emergency_state, emergency_reason
+            nonlocal emergency_actions, emergency_state, emergency_reason, emergency_ms
             emergency_reason = reason.value
+            started = time.perf_counter()
             emergency_actions, emergency_state = await _emergency_actions(
                 last_t_s, cfg, detail, protocol
             )
+            emergency_ms = (time.perf_counter() - started) * 1000.0
 
         watchdog = ThermalWatchdog(
             sensor,
@@ -453,6 +475,7 @@ async def run_scenario(
                 if frame.t_s + 1e-9 < next_tick_t:
                     continue
 
+                tick_started = time.perf_counter()
                 health = assess_health(frame.image, cfg["camera"])
                 sampler.update(frame.image, frame.t_s, rect)
 
@@ -464,6 +487,7 @@ async def run_scenario(
                     worker.submit(sampler.last_warped, frame.index, frame.t_s)
 
                 candidates = sampler.current(frame.t_s)
+                perception_ms.append((time.perf_counter() - tick_started) * 1000.0)
                 chosen = CandidateManager.select(candidates)
                 sample = telemetry.sample(frame.t_s)
 
@@ -513,7 +537,9 @@ async def run_scenario(
                     hydraulic_low_ms=hydraulic_low_ms,
                     maintenance=bool(get(cfg, "system.maintenance_mode")),
                 )
+                fusion_started = time.perf_counter()
                 decision = engine.update(evidence, frame.t_s)
+                fusion_ms.append((time.perf_counter() - fusion_started) * 1000.0)
                 last_decision = decision
                 last_t_s = frame.t_s
                 last_evidence = evidence
@@ -543,6 +569,8 @@ async def run_scenario(
                         sequence_state=emergency_state,
                         trip_reason=emergency_reason,
                         junction_c=_junction_of(watchdog),
+                        timing=TimingSamples(tuple(perception_ms), tuple(fusion_ms), emergency_ms),
+                        allow_llm=allow_llm,
                         sam_mode=mode,
                         sam_stats=worker.stats if worker is not None else None,
                         ticks=ticks,
@@ -555,9 +583,11 @@ async def run_scenario(
                     )
 
                 if decision.label in INCIDENT_LABELS:
+                    sequence_started = time.perf_counter()
                     actions, sequence_state = await _actions_for(
                         decision, frame.t_s, cfg, checkpoint_dir, protocol
                     )
+                    sequence_ms = (time.perf_counter() - sequence_started) * 1000.0
                     return await _finish(
                         name=name,
                         scenario=scenario,
@@ -571,6 +601,8 @@ async def run_scenario(
                         sequence_state=sequence_state,
                         trip_reason=None,
                         junction_c=None,
+                        timing=TimingSamples(tuple(perception_ms), tuple(fusion_ms), sequence_ms),
+                        allow_llm=allow_llm,
                         sam_mode=mode,
                         sam_stats=worker.stats if worker is not None else None,
                         ticks=ticks,
@@ -614,6 +646,8 @@ async def run_scenario(
             sequence_state=emergency_state,
             trip_reason=emergency_reason,
             junction_c=_junction_of(watchdog),
+            timing=TimingSamples(tuple(perception_ms), tuple(fusion_ms), emergency_ms),
+            allow_llm=allow_llm,
             sam_mode=mode,
             sam_stats=worker.stats if worker is not None else None,
             ticks=ticks,
@@ -637,6 +671,7 @@ async def run_scenario(
         sam=(SamSummary.from_stats(mode, worker.stats) if worker is not None else None),
         protocol_mode=protocol,
         sequence_state=None,
+        timing=TimingSamples(tuple(perception_ms), tuple(fusion_ms), sequence_ms),
     )
 
 
@@ -649,6 +684,7 @@ async def _explained_report(
     label: str,
     fixture_source: str,
     trip_reason: str | None,
+    allow_llm: bool = True,
 ) -> IncidentReport:
     """Ask Muse after the incident is sealed. Any failure keeps the fallback.
 
@@ -658,7 +694,7 @@ async def _explained_report(
     """
 
     section = cfg.get("report", {})
-    if not bool(section.get("enabled", True)):
+    if not allow_llm or not bool(section.get("enabled", True)):
         return report
 
     client = MuseClient(section)
@@ -704,6 +740,8 @@ async def _finish(
     sequence_state: IncidentState | None,
     trip_reason: str | None,
     junction_c: float | None,
+    timing: TimingSamples,
+    allow_llm: bool,
     sam_mode: str,
     sam_stats: SamStats | None,
     ticks: int,
@@ -760,6 +798,7 @@ async def _finish(
         label=label.value,
         fixture_source=fixture_source,
         trip_reason=trip_reason,
+        allow_llm=allow_llm,
     )
 
     directory = Path(out_dir) if out_dir is not None else ROOT / str(get(cfg, "demo.out_dir"))
@@ -776,4 +815,5 @@ async def _finish(
         sam=SamSummary.from_stats(sam_mode, sam_stats) if sam_stats is not None else None,
         protocol_mode=protocol_mode,
         sequence_state=sequence_state,
+        timing=timing,
     )

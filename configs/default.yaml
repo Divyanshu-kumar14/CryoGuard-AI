@@ -206,10 +206,9 @@ report:
   # The deterministic fallback is unconditional (NFR-SAF-01): it is not a toggle.
 
 bench:
-  split: "test"
-  repeats: 3
-  confidence: 0.95
-  seed: 427
+  split: "all"                 # the split is provisional (2 clips per side); report both
+  manifest: "fixtures/manifest.yaml"
+  confidence: 0.95             # drives the Clopper-Pearson interval
 
 demo:
   run_index: 1                 # base; a fixed scenario offset is added (01..04)
