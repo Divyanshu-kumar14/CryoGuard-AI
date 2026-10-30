@@ -4,19 +4,61 @@ The clamp target is never a literal: the real backend queries the device's
 minimum power limit and reads the value back. If NVML is missing, the device is
 unknown, or the readback does not land within tolerance, ``ClampResult.ok`` is
 false and the FSM hard-trips. It never pretends a clamp succeeded.
+
+Temperature honesty: the real backend reports ``NVML_TEMPERATURE_GPU`` — the
+single GPU temperature NVML exposes. It is labelled as GPU temperature, never
+as hotspot/junction, unless a future sensor proves a hotter domain.
 """
 
 from __future__ import annotations
 
+import time
+from dataclasses import dataclass
+from enum import StrEnum
 from importlib import import_module
 from importlib.util import find_spec
-from typing import Any
+from typing import Any, Protocol
 
 from cryoguard.orchestrator.incident_fsm import ClampResult
 
 
 class NvmlError(ValueError):
     """An unusable NVML configuration."""
+
+
+class GpuBackend(StrEnum):
+    REAL = "REAL"
+    SIMULATED = "SIMULATED"
+
+
+@dataclass(frozen=True)
+class GpuObservation:
+    """One consistent GPU poll.
+
+    Contract: inputs are raw NVML (or simulated) reads; output is a typed
+    snapshot with exactly one poll timestamp. ``source_sequence`` /
+    ``source_timestamp_s`` stay ``None`` unless the device genuinely supplies
+    a counter or sample clock — they are never fabricated locally, so a
+    replay check on them cannot be defeated by a poll counter.
+    ``utilization_pct`` / ``power_w`` / ``clock_mhz`` are ``None`` when the
+    device or capability is missing, never zero-filled.
+    """
+
+    temp_c: float
+    utilization_pct: float | None
+    power_w: float | None
+    clock_mhz: float | None
+    device_index: int
+    sampled_monotonic_s: float
+    source_sequence: int | None = None
+    source_timestamp_s: float | None = None
+    valid: bool = True
+    backend: GpuBackend = GpuBackend.SIMULATED
+    detail: str = ""
+
+
+class GpuSampler(Protocol):
+    def sample(self) -> GpuObservation: ...
 
 
 class FakeNvml:
@@ -29,19 +71,53 @@ class FakeNvml:
         fail: bool = False,
         junction_c: float = 40.0,
         loaded: bool = False,
+        utilization_pct: float | None = None,
+        power_w: float | None = None,
+        clock_mhz: float | None = None,
+        device_index: int = 0,
     ) -> None:
         if min_limit_w <= 0:
             raise NvmlError(f"min_limit_w must be positive: {min_limit_w}")
+        if device_index < 0:
+            raise NvmlError(f"device_index must be non-negative: {device_index}")
+        for name, value in (
+            ("utilization_pct", utilization_pct),
+            ("power_w", power_w),
+            ("clock_mhz", clock_mhz),
+        ):
+            if value is not None and value < 0:
+                raise NvmlError(f"{name} must be non-negative: {value}")
         self.min_limit_w = float(min_limit_w)
         self.fail = fail
         self._junction_c = float(junction_c)
         self.loaded = bool(loaded)
+        self._utilization_pct = None if utilization_pct is None else float(utilization_pct)
+        self._power_w = None if power_w is None else float(power_w)
+        self._clock_mhz = None if clock_mhz is None else float(clock_mhz)
+        self.device_index = int(device_index)
         self.calls = 0
 
-    def junction_c(self) -> float:
-        """SIMULATED junction temperature; the watchdog treats it as measured."""
+    def sample(self) -> GpuObservation:
+        """SIMULATED poll. No source counter exists, so it stays ``None``."""
 
-        return self._junction_c
+        return GpuObservation(
+            temp_c=float(self._junction_c),
+            utilization_pct=self._utilization_pct,
+            power_w=self._power_w,
+            clock_mhz=self._clock_mhz,
+            device_index=self.device_index,
+            sampled_monotonic_s=time.monotonic(),
+            source_sequence=None,
+            source_timestamp_s=None,
+            valid=True,
+            backend=GpuBackend.SIMULATED,
+            detail="SIMULATED GPU temperature",
+        )
+
+    def junction_c(self) -> float:
+        """SIMULATED GPU temperature; the watchdog treats it as measured."""
+
+        return self.sample().temp_c
 
     def under_load(self) -> bool:
         """SIMULATED load flag.
@@ -79,34 +155,15 @@ class RealNvml:
     def available() -> bool:
         return find_spec("pynvml") is not None
 
-    def junction_c(self) -> float:
-        """GPU temperature in Celsius. Raises rather than inventing a value."""
+    def sample(self) -> GpuObservation:
+        """One consistent poll in a single NVML session.
 
-        try:
-            pynvml: Any = import_module("pynvml")
-        except ImportError as exc:
-            raise NvmlError("pynvml is not installed") from exc
-
-        initialized = False
-        try:
-            pynvml.nvmlInit()
-            initialized = True
-            handle = pynvml.nvmlDeviceGetHandleByIndex(self.device_index)
-            return float(pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU))
-        except Exception as exc:  # NVML raises its own exception type
-            raise NvmlError(f"NVML error: {type(exc).__name__}: {exc}") from exc
-        finally:
-            if initialized:
-                try:
-                    pynvml.nvmlShutdown()
-                except Exception:
-                    pass
-
-    def under_load(self) -> bool:
-        """True when the GPU reports non-zero utilization.
-
-        The watchdog only treats a byte-identical junction trace as frozen while
-        the device is doing work; an idle GPU holds a constant temperature.
+        Contract: exactly one ``nvmlInit`` / ``nvmlShutdown`` pair per call,
+        so temperature, utilization, power, and clocks belong to the same
+        poll. A missing temperature or device handle raises ``NvmlError``
+        (fail-loud); a missing power/clock capability yields ``None`` for
+        that channel only. The temperature is ``NVML_TEMPERATURE_GPU`` and
+        is labelled as GPU temperature, never hotspot/junction.
         """
 
         try:
@@ -118,8 +175,49 @@ class RealNvml:
         try:
             pynvml.nvmlInit()
             initialized = True
-            handle = pynvml.nvmlDeviceGetHandleByIndex(self.device_index)
-            return int(pynvml.nvmlDeviceGetUtilizationRates(handle).gpu) > 0
+            try:
+                handle = pynvml.nvmlDeviceGetHandleByIndex(self.device_index)
+            except Exception as exc:
+                raise NvmlError(
+                    f"NVML error: unknown device index {self.device_index}: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+            try:
+                temp_c = float(pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU))
+            except Exception as exc:
+                raise NvmlError(
+                    f"NVML error: GPU temperature unavailable: {type(exc).__name__}: {exc}"
+                ) from exc
+            utilization: float | None = None
+            try:
+                utilization = float(pynvml.nvmlDeviceGetUtilizationRates(handle).gpu)
+            except Exception:
+                utilization = None
+            power_w: float | None = None
+            try:
+                power_w = float(pynvml.nvmlDeviceGetPowerUsage(handle)) / 1000.0
+            except Exception:
+                power_w = None
+            clock_mhz: float | None = None
+            try:
+                clock_mhz = float(pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_SM))
+            except Exception:
+                clock_mhz = None
+            return GpuObservation(
+                temp_c=temp_c,
+                utilization_pct=utilization,
+                power_w=power_w,
+                clock_mhz=clock_mhz,
+                device_index=self.device_index,
+                sampled_monotonic_s=time.monotonic(),
+                source_sequence=None,
+                source_timestamp_s=None,
+                valid=True,
+                backend=GpuBackend.REAL,
+                detail="NVML_TEMPERATURE_GPU",
+            )
+        except NvmlError:
+            raise
         except Exception as exc:  # NVML raises its own exception type
             raise NvmlError(f"NVML error: {type(exc).__name__}: {exc}") from exc
         finally:
@@ -128,6 +226,25 @@ class RealNvml:
                     pynvml.nvmlShutdown()
                 except Exception:
                     pass
+
+    def junction_c(self) -> float:
+        """GPU temperature in Celsius. Raises rather than inventing a value."""
+
+        return self.sample().temp_c
+
+    def under_load(self) -> bool:
+        """True when the GPU reports non-zero utilization or power.
+
+        Thin compatibility wrapper over :meth:`sample`; prefer ``sample()``
+        so the temperature and load belong to the same poll.
+        """
+
+        obs = self.sample()
+        if obs.utilization_pct is not None:
+            return obs.utilization_pct > 0
+        if obs.power_w is not None:
+            return obs.power_w > 0
+        return False
 
     def clamp(self) -> ClampResult:
         try:
@@ -173,10 +290,20 @@ class RealNvml:
 def build_nvml(section: dict[str, Any], *, tolerance_w: float = 5.0) -> FakeNvml | RealNvml:
     backend = str(section.get("backend", "fake")).lower()
     if backend == "fake":
+        loaded = bool(section.get("fake_loaded", section.get("loaded", False)))
+        utilization = section.get("fake_utilization_pct", section.get("utilization_pct"))
+        power = section.get("fake_power_w", section.get("power_w"))
+        clock = section.get("fake_clock_mhz", section.get("clock_mhz"))
         return FakeNvml(
             float(section["fake_min_limit_w"]),
             junction_c=float(section.get("fake_junction_c", 40.0)),
+            loaded=loaded,
+            utilization_pct=None if utilization is None else float(utilization),
+            power_w=None if power is None else float(power),
+            clock_mhz=None if clock is None else float(clock),
+            device_index=int(section.get("fake_device_index", section.get("device_index", 0))),
         )
     if backend == "real":
-        return RealNvml(tolerance_w=tolerance_w)
+        device_index = int(section.get("device_index", section.get("real_device_index", 0)))
+        return RealNvml(device_index=device_index, tolerance_w=tolerance_w)
     raise NvmlError(f"unknown nvml.backend {backend!r} (expected fake or real)")

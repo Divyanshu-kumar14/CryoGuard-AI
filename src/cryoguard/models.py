@@ -45,11 +45,18 @@ class IncidentState(StrEnum):
 
 
 class ValveStatus(StrEnum):
-    """``VALVE_SEAL_LEAK``: the stem closed, the line did not depressurize."""
+    """Isolation outcome. ``VALVE_SEAL_LEAK``: stem closed, line pressurized.
+
+    ``SENSOR_DISAGREEMENT``: the two depressurization witnesses (DI 1 and HR 0)
+    contradict each other, or one witness is unavailable. It is a FAULT-class
+    outcome: the FSM must cut power (HARD_TRIP / FAILED_SAFE) and must never
+    report ISOLATED.
+    """
 
     VERIFIED = "VERIFIED"
     VERIFIED_SLOW = "VERIFIED_SLOW"
     VALVE_SEAL_LEAK = "VALVE_SEAL_LEAK"
+    SENSOR_DISAGREEMENT = "SENSOR_DISAGREEMENT"
     FAULT = "FAULT"
 
 

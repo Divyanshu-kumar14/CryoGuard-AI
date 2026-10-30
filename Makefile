@@ -5,7 +5,7 @@ MYPY := .venv/bin/mypy
 SCENARIO ?= leak
 SPLIT ?= all
 
-.PHONY: setup lint format typecheck test check export fixtures probe serve demo sims bench bench-check seed-sam checkpoints env-check
+.PHONY: setup lint format typecheck test check export fixtures probe serve demo sims bench bench-check readme-sync sam-audit seed-sam checkpoints env-check
 
 ## Create the pinned environment from uv.lock. uv owns the venv; .python-version pins 3.11.
 setup:
@@ -63,6 +63,15 @@ bench:
 ## Re-run the benchmark and fail if the committed runHash or rows drifted.
 bench-check:
 	PYTHONPATH=src $(PY) -m cryoguard.bench --split $(SPLIT) --check
+	PYTHONPATH=src $(PY) scripts/render_readme_benchmark.py --check
+
+## Re-render the README benchmark block from reports/benchmark.json.
+readme-sync:
+	PYTHONPATH=src $(PY) scripts/render_readme_benchmark.py
+
+## Live hosted SAM prompt audit (needs META_API_KEY; writes artifacts/sam_live_audit.json).
+sam-audit:
+	PYTHONPATH=src $(PY) scripts/audit_sam_prompts.py
 
 ## Seed the deterministic SAM cache (fixture provenance, never a hosted call).
 seed-sam:

@@ -61,6 +61,15 @@ sam:
   anchor_ttl_s: 1.2            # a SAM anchor bridges the gap to the next call
   cache_dir: "artifacts/sam_cache"
   prompts:
+    # Default coolant prompt. Honest limitation: the 2026-10-31 live audit
+    # (artifacts/sam_live_audit.json) returned zero matches for this phrasing
+    # and for two alternates on two synthetic crops. Zero matches is a valid
+    # empty lane, not an error. Earlier notes claimed alternate phrasings
+    # produced masks; that result was not reproduced. The default is kept
+    # anyway: selecting a prompt because it yields masks would be overfitting
+    # to the demo clip. Trial alternates offline with
+    # SamClient.evaluate_prompts, which records every prompt and its result
+    # without ranking them.
     coolant: "fluorescent yellow liquid droplet"
     condensation: "water bead on metal"
 
@@ -141,9 +150,19 @@ orchestrator:
 
 watchdog:
   enabled: true
+  fallback_enabled: true    # independent direct-BMC ForceOff if the primary actuation fails;
+                            # timeouts reuse bmc.timeout_ms / bmc.power_off_timeout_ms (no second knob)
   period_ms: 100              # its own task, independent of the fusion loop
   max_staleness_ms: 500       # a sample older than this is a blind sensor
   max_frozen_ticks: 15        # 15 x period = 1.5 s of a byte-identical trace under load
+  # Sustained-load hysteresis: one utilization spike must not arm the freeze
+  # detector. Load latches after sustained_load_ticks consecutive ticks above
+  # the min thresholds and releases only below the release thresholds.
+  sustained_load_min_util_pct: 10.0
+  sustained_load_min_power_w: 70.0
+  sustained_load_ticks: 5
+  sustained_load_release_util_pct: 5.0
+  sustained_load_release_power_w: 50.0
   # The limit is thermal_model.watchdog_limit_c (90 C), which is validated to
   # sit below thermal_model.t_junction_max_c. One knob, no duplicate literal.
 
@@ -152,6 +171,8 @@ nvml:
   fake_min_limit_w: 200.0
   fake_junction_c: 42.0       # SIMULATED GPU temperature; the fake sensor never runs hot
   fake_num_gpus: 4
+  fake_loaded: false          # SIMULATED load flag; true arms sustained-load tracking
+  device_index: 0             # real backend: NVML device ordinal (NVML_TEMPERATURE_GPU)
 
 plc:
   host: "127.0.0.1"
@@ -161,8 +182,10 @@ plc:
   valve_slow_ms: 1200         # <= slow: VERIFIED; <= fault: VERIFIED_SLOW; above: FAULT
   valve_fault_ms: 1500
   depressurize_ms: 500
-  depressurized_max_psi: 5.0       # DI 1002 OR pressure <= this proves the line is isolated
+  depressurized_max_psi: 5.0       # BOTH witnesses must agree: DI 1002 AND pressure <= this
   depressurize_timeout_ms: 1500    # limit closed but still above max => VALVE_SEAL_LEAK
+  depressurize_confirm_reads: 3    # N consecutive agreeing depressurized reads before VERIFIED
+  depressurize_hysteresis_psi: 2.0 # release margin: confirm <= max, refute >= max + hyst
   open_pressure_psi: 34.0
   nominal_flow_lpm: 9.0
   tick_ms: 20
@@ -206,7 +229,11 @@ report:
   api_key_env: "MUSE_API_KEY"  # secret only via the environment
   timeout_ms: 15000
   max_retries: 1
-  max_tokens: 600
+  max_tokens: 600   # small by design: bounds cost/latency per incident. Muse Spark
+                    # Open is a reasoning model, so 600 can be consumed by reasoning
+                    # before JSON content (finish_reason=length -> truncated_length
+                    # in the proof log). Raise via BASETEN_MAX_TOKENS=2400 only for
+                    # a live report; every extra token costs on every incident.
   prompts: "configs/prompts.yaml"
   proof_log: "artifacts/open_weights_proof.jsonl"
   # The deterministic fallback is unconditional (NFR-SAF-01): it is not a toggle.

@@ -24,6 +24,17 @@ match, encoded as base85 and decoded with the official ``meta-sam-parser``
 package. The JSON fixture in ``fixtures/sam/`` remains a schema fixture for
 injected transports; the cache entry records ``provenance`` so no run can claim
 a fixture mask came from the API.
+
+Prompt audit (honest limitation): the configured coolant prompt
+(``fluorescent yellow liquid droplet``) is the default and stays the default.
+The 2026-10-31 live audit (``artifacts/sam_live_audit.json``) returned **zero
+matches** for that prompt and for ``bright green blob`` / ``yellow-green glow``
+on two synthetic crops. A zero-match lane is a valid result, not an error, and
+earlier notes claiming masks for the alternates were not reproduced. The
+default is therefore *not* selected on mask yield — picking a prompt because
+it produces a mask would be overfitting to the demo clip. Use
+:meth:`SamClient.evaluate_prompts` to trial alternates offline; every
+prompt and its result (or error) is recorded, never silently ranked.
 """
 
 from __future__ import annotations
@@ -82,6 +93,31 @@ class SamResult:
     cached: bool
     cache_key: str
     prompt: str
+    model: str = ""
+
+
+@dataclass(frozen=True)
+class PromptTrial:
+    """One prompt-evaluation record: the prompt and what it produced.
+
+    ``result`` is set on success (including a valid zero-match ``()``);
+    ``error`` is set when the prompt failed (transport, timeout, malformed
+    response). Exactly one of the two is set. Trials are recorded, never
+    ranked: a mask is not evidence a prompt is better.
+    """
+
+    prompt: str
+    model: str
+    result: SamResult | None = None
+    error: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.result is not None
+
+    @property
+    def mask_count(self) -> int:
+        return len(self.result.masks) if self.result is not None else 0
 
 
 def count_prompt_tokens(prompt: str) -> int:
@@ -156,10 +192,12 @@ def _mask_from_entry(entry: dict[str, Any], shape: tuple[int, int], threshold: i
     decoded = cv2.imdecode(buffer, cv2.IMREAD_GRAYSCALE)
     if decoded is None:
         raise SamResponseError("mask payload is not a decodable image")
+    if decoded.ndim != 2:
+        raise SamResponseError(f"mask payload is not a 2-D image: ndim={decoded.ndim}")
 
     if decoded.shape != shape:
         decoded = cv2.resize(decoded, (shape[1], shape[0]), interpolation=cv2.INTER_NEAREST)
-    mask = decoded >= int(threshold)
+    mask = validate_crop_mask(decoded >= int(threshold), shape)
 
     bbox = entry.get("bbox_px")
     if bbox is None:
@@ -168,15 +206,45 @@ def _mask_from_entry(entry: dict[str, Any], shape: tuple[int, int], threshold: i
             bbox = [0, 0, 0, 0]
         else:
             bbox = [int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1]
-    if len(bbox) != 4:
-        raise SamResponseError(f"bbox_px must have four values, got {bbox!r}")
-
-    x0, y0, x1, y1 = (int(v) for v in bbox)
+    try:
+        if len(bbox) != 4:
+            raise SamResponseError(f"bbox_px must have four values, got {bbox!r}")
+        x0, y0, x1, y1 = (int(v) for v in bbox)
+    except SamResponseError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise SamResponseError(f"bbox_px is malformed: {bbox!r} ({exc})") from exc
     x0, x1 = sorted((max(0, x0), min(shape[1], x1)))
     y0, y1 = sorted((max(0, y0), min(shape[0], y1)))
 
-    score = float(entry.get("score", 1.0))
+    try:
+        score = float(entry.get("score", 1.0))
+    except (TypeError, ValueError) as exc:
+        raise SamResponseError(f"mask score is malformed: {entry.get('score')!r}") from exc
+    if not np.isfinite(score):
+        raise SamResponseError(f"mask score is not finite: {entry.get('score')!r}")
     return SamMask(mask=mask, bbox_px=(x0, y0, x1, y1), score=max(0.0, min(1.0, score)))
+
+
+def validate_crop_mask(mask: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+    """Validate a crop-sized mask before it may touch the pipeline.
+
+    Returns a 2-D boolean array of exactly ``shape``. Anything else —
+    wrong rank, wrong extent, non-array — is a :class:`SamResponseError`,
+    never a silent reshape: a malformed mask must fail loudly at the
+    boundary instead of corrupting tracker state downstream.
+    """
+
+    if not isinstance(mask, np.ndarray):
+        raise SamResponseError(f"mask is not an array: {type(mask).__name__}")
+    if mask.ndim != 2:
+        raise SamResponseError(f"mask must be 2-D, got ndim={mask.ndim} shape={mask.shape}")
+    if mask.shape != shape:
+        raise SamResponseError(f"mask shape {mask.shape} does not match crop {shape}")
+    try:
+        return np.ascontiguousarray(mask).astype(bool)
+    except (TypeError, ValueError) as exc:
+        raise SamResponseError(f"mask dtype {mask.dtype} is not boolean-convertible") from exc
 
 
 def _mask_entries(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -275,6 +343,7 @@ def parse_sam_text(text: str, image_shape: tuple[int, int]) -> tuple[SamMask, ..
                 )
                 > 0
             )
+        mask = validate_crop_mask(mask, image_shape)
 
         x0, y0, x1, y1 = (
             int(match.group("x1")),
@@ -353,11 +422,22 @@ class SamClient:
             image = cv2.imread(str(mask_file), cv2.IMREAD_GRAYSCALE)
             if image is None:
                 raise SamError(f"cache mask is unreadable: {mask_file}")
+            binary = validate_crop_mask(image >= self.threshold, image_shape)
+            try:
+                bbox = tuple(int(v) for v in entry["bbox_px"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise SamError(f"cache entry has a malformed bbox_px: {mask_file}") from exc
+            if len(bbox) != 4:
+                raise SamError(f"cache entry has a malformed bbox_px: {mask_file}")
+            try:
+                score = float(entry.get("score", 1.0))
+            except (TypeError, ValueError) as exc:
+                raise SamError(f"cache entry has a malformed score: {mask_file}") from exc
             masks.append(
                 SamMask(
-                    mask=image >= self.threshold,
-                    bbox_px=tuple(int(v) for v in entry["bbox_px"]),  # type: ignore[arg-type]
-                    score=float(entry.get("score", 1.0)),
+                    mask=binary,
+                    bbox_px=bbox,
+                    score=max(0.0, min(1.0, score)),
                 )
             )
 
@@ -367,6 +447,7 @@ class SamClient:
             cached=True,
             cache_key=key,
             prompt=str(metadata.get("prompt", "")),
+            model=str(metadata.get("model", self.model)),
         )
 
     def store(
@@ -486,4 +567,37 @@ class SamClient:
             text = self._call_api(image_bgr, image_bytes, prompt)
             masks = parse_sam_text(text, image_bgr.shape[:2])
         self.store(key, prompt, masks, "api", image_bgr.shape[:2])
-        return SamResult(masks=masks, provenance="api", cached=False, cache_key=key, prompt=prompt)
+        return SamResult(
+            masks=masks,
+            provenance="api",
+            cached=False,
+            cache_key=key,
+            prompt=prompt,
+            model=self.model,
+        )
+
+    def evaluate_prompts(
+        self, image_bgr: np.ndarray, prompts: list[str]
+    ) -> tuple[PromptTrial, ...]:
+        """Trial several prompts against one crop, recording every outcome.
+
+        Each prompt is segmented independently; a per-prompt failure is
+        recorded in its trial, never raised, so one bad prompt cannot hide
+        the rest. Any exception is recorded — including an over-token prompt
+        (:class:`SamPromptError` is a ``ValueError``, not a ``SamError``)
+        and a raw transport error — because a trial that raised is still a
+        trial outcome, not a reason to stop the audit. The caller's
+        configured default is unchanged — the trials are an audit, not a
+        selection: a mask is not evidence a prompt is better, and an empty
+        (zero-match) lane is a valid result, not an error to optimise away.
+        """
+
+        trials: list[PromptTrial] = []
+        for prompt in prompts:
+            try:
+                result = self.segment(image_bgr, prompt)
+            except Exception as exc:
+                trials.append(PromptTrial(prompt=prompt, model=self.model, error=repr(exc)))
+                continue
+            trials.append(PromptTrial(prompt=prompt, model=self.model, result=result))
+        return tuple(trials)

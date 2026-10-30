@@ -19,6 +19,9 @@ system: |
     physical hardware.
   - Reply with exactly one JSON object and nothing else:
     {"root_cause": "<2-4 sentences>", "uncertainty": "<1-2 sentences>"}
+  - Keep each field 1-2000 characters, non-empty, and include no other keys.
+    Overlong, empty, or extra-key replies fail validation and get one compact
+    retry without the previous body echoed back.
 
 labels:
   CONFIRMED_LEAK: |

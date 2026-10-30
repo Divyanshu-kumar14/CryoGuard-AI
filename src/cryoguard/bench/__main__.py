@@ -16,6 +16,7 @@ from typing import Any
 
 import yaml
 
+from cryoguard.bench.faults import run_fault_matrix
 from cryoguard.bench.report import build_latency, build_payload, write_reports
 from cryoguard.bench.runner import BenchError, load_manifest, run_benchmark
 from cryoguard.config import config_hash, load
@@ -123,6 +124,7 @@ def main(argv: list[str] | None = None) -> int:
         fusion_hash=str(freeze["fusion_hash"]),
         git_sha=sha,
         confidence=float(cfg["bench"]["confidence"]),
+        fault_summary=run_fault_matrix(),
     )
     latency = build_latency(
         runs,
@@ -144,6 +146,19 @@ def main(argv: list[str] | None = None) -> int:
         if baseline.get("clips") != payload["clips"]:
             print("benchmark rows differ from the committed rows", file=sys.stderr)
             return 1
+        for key in (
+            "metrics",
+            "headline",
+            "verification",
+            "localization",
+            "sourceLocalization",
+            "faultInjection",
+            "checkpointRecovery",
+            "valveIsolation",
+        ):
+            if baseline.get(key) != payload.get(key):
+                print(f"benchmark block {key!r} differs from the committed report", file=sys.stderr)
+                return 1
         print(f"benchmark matches the committed runHash {payload['runHash']}")
         return 0
 
@@ -151,10 +166,19 @@ def main(argv: list[str] | None = None) -> int:
         payload=payload, latency=latency, out_dir=ROOT / args.out
     )
     print(_summary(payload, latency))
-    print(f"benchmark {json_path.relative_to(ROOT)}")
-    print(f"markdown  {md_path.relative_to(ROOT)}")
-    print(f"latency   {latency_path.relative_to(ROOT)} (not deterministic)")
+    print(f"benchmark {_shown(json_path)}")
+    print(f"markdown  {_shown(md_path)}")
+    print(f"latency   {_shown(latency_path)} (not deterministic)")
     return 0
+
+
+def _shown(path: Path) -> str:
+    """Relative when inside the repo, absolute otherwise (``--out /tmp/...``)."""
+
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
 
 
 if __name__ == "__main__":

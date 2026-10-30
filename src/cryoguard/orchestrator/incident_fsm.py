@@ -2,20 +2,29 @@
 
 Two invariants, both tested:
   1. the valve is never commanded before the power clamp is verified by readback;
-  2. isolation is reached on verified closure - the limit switch *and* a
-     depressurized line - and a pending checkpoint must not delay it (delta
-     C-04). The checkpoint gates power-off, not isolation.
+  2. isolation is reached on verified closure - the limit switch *and* both
+     depressurization witnesses agreeing (DI 1 and HR 0 with stabilization) -
+     and a pending checkpoint must not delay it (delta C-04). The checkpoint
+     gates power-off, not isolation.
 
 Failure paths follow T-FSM-04: a clamp readback failure, a valve limit-switch
-FAULT, or a stem that closes onto a still-pressurized line (VALVE_SEAL_LEAK)
-escalates to a node power cut. Only when that cut also fails does the sequence
-exit ``FAILED_SAFE``. A valve that did not close is never reported as isolated,
-and a power cut that was not accepted and read back as ``Off`` is never reported
-as ``NODE_POWERED_DOWN``.
+FAULT, a SENSOR_DISAGREEMENT (witnesses contradict or a witness is
+unavailable), or a stem that closes onto a still-pressurized line
+(VALVE_SEAL_LEAK) escalates to a node power cut. Only when that cut also fails
+does the sequence exit ``FAILED_SAFE``. A valve that did not close, or whose
+sensors disagree, is never reported as isolated, and a power cut that was not
+accepted and read back as ``Off`` is never reported as ``NODE_POWERED_DOWN``.
+
+Safety ordering (structural, preserved): clamp -> valve close (Close accepted,
+Stem closed) -> isolation verify (Line depressurized, Isolation verified or
+Verification failed) -> cordon -> checkpoint verify -> power-off -> requeue.
+The checkpoint starts first but settles independently; it gates power-off,
+never isolation.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -145,6 +154,19 @@ class CheckpointResult:
     verified: bool = True
 
 
+def power_verified(power: PowerResult) -> bool:
+    """Off is only claimed from a readback, never from an accepted command.
+
+    A port that reports acceptance alone (``ok`` with an empty readback status)
+    is not evidence that the node lost power. The in-memory BMC has no socket to
+    poll, so its deterministic ``ok + Off + simulated`` verdict counts.
+    """
+
+    return bool(
+        power.ok and power.state == "Off" and (power.simulated or power.status == VERIFIED_OFF)
+    )
+
+
 class ConfirmedLeakOrchestrator:
     """Runs the CONFIRMED_LEAK sequence in physical order (D-06)."""
 
@@ -158,6 +180,7 @@ class ConfirmedLeakOrchestrator:
         scheduler: SchedulerPort,
         clamp_latency_ms: float = 0.0,
         on_step: StepCallback | None = None,
+        abort: Callable[[], str | None] | None = None,
     ) -> None:
         self.clock = clock
         self.nvml = nvml
@@ -167,6 +190,7 @@ class ConfirmedLeakOrchestrator:
         self.scheduler = scheduler
         self.clamp_latency_ms = clamp_latency_ms
         self.on_step = on_step
+        self.abort = abort
         self.log = ActionLog(clock, on_step)
 
     @property
@@ -237,7 +261,7 @@ class ConfirmedLeakOrchestrator:
         if not clamp.ok:
             self._cordon()
             power = self._power_cut("clamp readback failed")
-            fsm.fire("hard_trip" if power.ok else "failed_safe", self.clock.now())
+            fsm.fire("hard_trip" if power_verified(power) else "failed_safe", self.clock.now())
             return fsm
         self.clock.advance(self.clamp_latency_ms / 1000.0)
         fsm.fire("clamp_verified", self.clock.now())
@@ -247,30 +271,47 @@ class ConfirmedLeakOrchestrator:
             valve_status = "FAULT"
         elif valve.status is ValveStatus.VALVE_SEAL_LEAK:
             valve_status = "VALVE_SEAL_LEAK"
+        elif valve.status is ValveStatus.SENSOR_DISAGREEMENT:
+            valve_status = "SENSOR_DISAGREEMENT"
         elif valve.status is ValveStatus.VERIFIED_SLOW:
             valve_status = "LIMIT_SWITCH_CLOSED_SLOW"
         else:
             valve_status = "LIMIT_SWITCH_CLOSED"
+        if valve.status in (ValveStatus.VERIFIED, ValveStatus.VERIFIED_SLOW):
+            fallback = f"limit switch; band {valve.status.value}"
+            valve_detail = (
+                "Close accepted; Stem closed; Line depressurized; "
+                f"Isolation verified; {valve.detail or fallback}"
+            )
+        else:
+            fallback = f"limit switch; band {valve.status.value}"
+            valve_detail = (
+                "Verification failed; Stem closed; Line depressurized: unproven; "
+                f"{valve.detail or fallback}"
+            )
         self._record(
             "PLC",
             "VALVE_CLOSE",
             valve_status,
-            valve.detail or f"limit switch; band {valve.status.value}",
+            valve_detail,
         )
 
-        # A FAULT means the stem never closed; a VALVE_SEAL_LEAK means it closed
-        # but the branch is still pressurized. Anything short of a verified,
-        # depressurized close is not isolation: coolant is still reaching the
-        # chassis, so cut power now and claim nothing else.
+        # A FAULT means the stem never closed (or reopened / transport failed);
+        # a VALVE_SEAL_LEAK means it closed but the branch is still pressurized;
+        # a SENSOR_DISAGREEMENT means the witnesses contradict each other or one
+        # is unavailable. Anything short of a verified, depressurized close with
+        # agreeing witnesses is not isolation: coolant may still be reaching the
+        # chassis, so cut power now and claim nothing else. Never ISOLATED.
         if valve.status not in (ValveStatus.VERIFIED, ValveStatus.VERIFIED_SLOW):
             self._cordon()
-            reason = (
-                "valve seal leak: line still pressurized"
-                if valve.status is ValveStatus.VALVE_SEAL_LEAK
-                else "valve limit switch fault"
-            )
+            if valve.status is ValveStatus.VALVE_SEAL_LEAK:
+                reason = "valve seal leak: line still pressurized"
+            elif valve.status is ValveStatus.SENSOR_DISAGREEMENT:
+                reason = "sensor disagreement: isolation unproven"
+            else:
+                reason = "valve limit switch fault"
             power = self._power_cut(reason)
-            fsm.fire("hard_trip" if power.ok else "failed_safe", self.clock.now())
+            fsm.fire("hard_trip" if power_verified(power) else "failed_safe", self.clock.now())
             return fsm
         # The scenario clock advances by the configured nominal travel, not the
         # measured wall time, so two runs of the same clip produce the same
@@ -299,12 +340,28 @@ class ConfirmedLeakOrchestrator:
         )
 
         power = self._power_cut("confirmed leak")
-        if not power.ok:
+        if not power_verified(power):
             fsm.fire("failed_safe", self.clock.now())
             return fsm
         fsm.fire("power_off", self.clock.now())
 
-        node = self.scheduler.requeue(checkpoint.step)
+        # The watchdog may have tripped while this sequence was in flight. Its
+        # trip took precedence: do not reschedule a job onto a node that an
+        # independent safety path has just powered down.
+        if self.abort is not None:
+            abort_reason = self.abort()
+            if abort_reason:
+                self._record("SLURM", "REQUEUE", "ABORTED", abort_reason)
+                return fsm
+
+        try:
+            node = self.scheduler.requeue(checkpoint.step)
+        except Exception as exc:
+            # Power is verified off; a scheduler failure must not erase that fact
+            # or turn into a crash that loses the incident report. Stay powered
+            # down and leave the requeue visibly failed for an operator.
+            self._record("SLURM", "REQUEUE", "FAILED", f"{type(exc).__name__}: {exc}")
+            return fsm
         self._record("SLURM", "REQUEUE", "REQUEUED", f"node={node}; step={checkpoint.step}")
         fsm.fire("requeued", self.clock.now())
         fsm.fire("closed", self.clock.now())

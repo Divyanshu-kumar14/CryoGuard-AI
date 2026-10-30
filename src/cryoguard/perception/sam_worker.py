@@ -7,11 +7,28 @@ refinement, not ticks.
 The worker is deliberately a *scheduler*, not a tracker: it crops the hydraulic
 regions, calls the client, and hands back full-canvas masks. The pipeline applies
 those masks through ``FastTracker.reanchor``.
+
+Guarantees this scheduler owns:
+
+* non-blocking: :meth:`submit` only enqueues (or serves a fast local cache
+  read); live calls run in tasks bounded by ``timeout_sec`` and degrade to
+  :class:`SamFailure`, never to a stalled safety loop;
+* provenance: every sample carries ``cached`` *and* ``provenance``. A
+  fixture-seeded cache hit stays ``cached=True, provenance="fixture"`` — it
+  is never relabelled ``live`` or ``api``;
+* monotonicity: a late result from an older frame cannot overwrite newer
+  tracker state. Results at or below the emitted watermark are dropped and
+  counted as ``stale``;
+* mask hygiene: a malformed mask (wrong rank, wrong extent) is a recorded
+  failure, not a tracker write;
+* score separation: ``SamSample.score`` is the segmentation confidence for
+  display only. It is never written onto a track and never enters fusion P.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -19,7 +36,9 @@ from typing import Any
 
 import numpy as np
 
-from cryoguard.perception.sam_client import SamClient, SamResult
+from cryoguard.perception.sam_client import SamCacheMiss, SamClient, SamResult
+
+logger = logging.getLogger(__name__)
 
 
 class SamWorkerError(RuntimeError):
@@ -72,10 +91,21 @@ class SamStats:
     api: int = 0
     failures: int = 0
     skipped: int = 0
+    stale: int = 0
     regions: int = 0
+    # Per-prompt audit: prompt -> {"submitted", "applied", "empty", "failures"}.
+    # The configured default stays the default; these counts exist so a prompt
+    # trial can be reported honestly, not so a prompt can be picked for yield.
+    per_prompt: dict[str, dict[str, int]] = field(default_factory=dict)
     # Wall-clock samples for reports/latency.json; never part of a decision.
     cached_ms: list[float] = field(default_factory=list)
     live_ms: list[float] = field(default_factory=list)
+
+    def note(self, prompt: str, key: str) -> None:
+        bucket = self.per_prompt.setdefault(
+            prompt, {"submitted": 0, "applied": 0, "empty": 0, "failures": 0}
+        )
+        bucket[key] = bucket.get(key, 0) + 1
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -87,6 +117,7 @@ class SamStats:
             "api": self.api,
             "failures": self.failures,
             "skipped": self.skipped,
+            "stale": self.stale,
             "regions": self.regions,
         }
 
@@ -134,6 +165,8 @@ class SamWorker:
         rate = float(sam_cfg["async_rate_hz"])
         if rate <= 0:
             raise SamWorkerError(f"sam.async_rate_hz must be positive: {rate}")
+        if rate > 2.0:
+            raise SamWorkerError(f"sam.async_rate_hz must stay <= 2 Hz (D-02): {rate}")
         self.stride = max(1, int(round(fps / rate)))
         self.in_flight = max(1, int(sam_cfg["in_flight"]))
         self.timeout_s = float(sam_cfg["timeout_sec"])
@@ -141,6 +174,11 @@ class SamWorker:
         self._tasks: set[asyncio.Task[None]] = set()
         self._ready: deque[SamSample] = deque()
         self._failures: deque[SamFailure] = deque()
+        # Monotonicity watermark: the newest (frame_index, t_s) already emitted.
+        # A task that finishes late with an older frame is dropped in _accept
+        # so it can never overwrite newer tracker state.
+        self._emitted_frame = -1
+        self._emitted_t = float("-inf")
         self.stats = SamStats(regions=len(self.rois))
 
     def due(self, frame_index: int) -> bool:
@@ -167,15 +205,35 @@ class SamWorker:
             return
 
         if self.client.mode == "cache":
-            # A miss must surface now, not inside a task nobody awaits.
+            # A miss must surface now, not inside a task nobody awaits. Any
+            # other failure (corrupt cache entry, malformed mask) is recorded,
+            # never raised: submit runs inside the safety tick (pipeline.py),
+            # so a bad entry must cost refinement, not the run.
             started = time.perf_counter()
-            result = self.client.segment(crop, self.prompt)
+            try:
+                result = self.client.segment(crop, self.prompt)
+            except SamCacheMiss:
+                raise
+            except Exception as exc:
+                self.stats.failures += 1
+                self.stats.note(self.prompt, "failures")
+                self._failures.append(SamFailure(roi.region_id, frame_index, t_s, repr(exc)))
+                logger.warning("SAM cache read for %s failed: %r", roi.region_id, exc)
+                return
             self.stats.cached_ms.append((time.perf_counter() - started) * 1000.0)
             self.stats.submitted += 1
-            self._accept(roi, result, frame_index, t_s)
+            self.stats.note(self.prompt, "submitted")
+            try:
+                self._accept(roi, result, frame_index, t_s)
+            except Exception as exc:  # a bad mask must not crash the tick
+                self.stats.failures += 1
+                self.stats.note(self.prompt, "failures")
+                self._failures.append(SamFailure(roi.region_id, frame_index, t_s, repr(exc)))
+                logger.warning("SAM cache result for %s dropped: %r", roi.region_id, exc)
             return
 
         self.stats.submitted += 1
+        self.stats.note(self.prompt, "submitted")
         task = asyncio.create_task(self._run(roi, crop, frame_index, t_s))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
@@ -189,14 +247,34 @@ class SamWorker:
             )
         except Exception as exc:  # a dead API must not stop the safety loop
             self.stats.failures += 1
+            self.stats.note(self.prompt, "failures")
             self._failures.append(SamFailure(roi.region_id, frame_index, t_s, repr(exc)))
+            logger.warning(
+                "SAM live request for %s failed (prompt=%r): %r",
+                roi.region_id,
+                self.prompt,
+                exc,
+            )
             return
 
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         (self.stats.cached_ms if result.cached else self.stats.live_ms).append(elapsed_ms)
-        self._accept(roi, result, frame_index, t_s)
+        try:
+            self._accept(roi, result, frame_index, t_s)
+        except Exception as exc:  # a malformed live mask must not corrupt the loop
+            self.stats.failures += 1
+            self.stats.note(self.prompt, "failures")
+            self._failures.append(SamFailure(roi.region_id, frame_index, t_s, repr(exc)))
+            logger.warning("SAM live result for %s dropped: %r", roi.region_id, exc)
 
     def _accept(self, roi: Roi, result: SamResult, frame_index: int, t_s: float) -> None:
+        # Stale guard: tasks may finish out of order. An older frame must never
+        # overwrite state a newer frame already anchored.
+        if (frame_index, t_s) < (self._emitted_frame, self._emitted_t):
+            self.stats.stale += 1
+            return
+        self._emitted_frame, self._emitted_t = frame_index, t_s
+
         if result.cached:
             self.stats.cached += 1
         else:
@@ -206,18 +284,57 @@ class SamWorker:
         else:
             self.stats.api += 1
         if not result.masks:
+            # Zero matches is a valid outcome (the configured coolant prompt
+            # returns it on live), not a failure — but it is recorded per
+            # prompt so the limitation stays visible instead of silent.
+            self.stats.note(result.prompt or self.prompt, "empty")
+            logger.info(
+                "SAM returned zero matches for region %s (prompt=%r provenance=%s)",
+                roi.region_id,
+                result.prompt,
+                result.provenance,
+            )
             return
 
         width, height = self.canvas_px
+        expected = (roi.y1 - roi.y0, roi.x1 - roi.x0)
         for sam_mask in result.masks:
+            mask = np.asarray(sam_mask.mask)
+            if mask.ndim != 2 or mask.shape != expected:
+                self.stats.failures += 1
+                self.stats.note(result.prompt or self.prompt, "failures")
+                self._failures.append(
+                    SamFailure(
+                        roi.region_id,
+                        frame_index,
+                        t_s,
+                        f"SamResponseError: mask shape {mask.shape} != ROI {expected}",
+                    )
+                )
+                logger.warning(
+                    "SAM mask for %s dropped: shape %s != ROI %s",
+                    roi.region_id,
+                    mask.shape,
+                    expected,
+                )
+                continue
             full = np.zeros((height, width), dtype=bool)
-            full[roi.y0 : roi.y1, roi.x0 : roi.x1] = sam_mask.mask
+            try:
+                full[roi.y0 : roi.y1, roi.x0 : roi.x1] = mask.astype(bool)
+            except (TypeError, ValueError) as exc:
+                self.stats.failures += 1
+                self.stats.note(result.prompt or self.prompt, "failures")
+                self._failures.append(SamFailure(roi.region_id, frame_index, t_s, repr(exc)))
+                logger.warning("SAM mask for %s dropped: %r", roi.region_id, exc)
+                continue
             bx0, by0, bx1, by1 = sam_mask.bbox_px
             self._ready.append(
                 SamSample(
                     region_id=roi.region_id,
                     mask_full=full,
                     bbox_full=(roi.x0 + bx0, roi.y0 + by0, roi.x0 + bx1, roi.y0 + by1),
+                    # Segmentation confidence, display only: never written to a
+                    # track and never an input to fusion P.
                     score=sam_mask.score,
                     provenance=result.provenance,
                     cached=result.cached,
@@ -226,6 +343,7 @@ class SamWorker:
                 )
             )
             self.stats.applied += 1
+            self.stats.note(result.prompt or self.prompt, "applied")
 
     def poll(self) -> list[SamSample]:
         samples: list[SamSample] = []

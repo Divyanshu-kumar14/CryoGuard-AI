@@ -20,11 +20,12 @@ from typing import Any
 from cryoguard.bench.metrics import clopper_pearson, mean_std, percentile
 from cryoguard.bench.runner import FITTING_RADIUS_MM, BenchRun
 
-BENCHMARK_TITLE = "Deterministic Regression & Safety Verification Suite (4 Physical Scenarios)"
+BENCHMARK_TITLE = "Deterministic Regression & Safety Verification Suite (4 Synthetic Scenarios)"
 SAMPLE_NOTICE = (
     "Notice: Sample size n=4 across four synthetic benchmark fixtures. These results "
-    "establish deterministic reproducibility across specified physical failure modes, "
-    "not statistical generalization across unmodeled data center environments."
+    "are deterministic regression verification of specified failure modes — recall "
+    "X/Y with exact Clopper-Pearson intervals — not population performance estimates "
+    "and not evidence of generalization to unmodeled data center environments."
 )
 
 
@@ -130,6 +131,26 @@ def _localization(rows: list[dict[str, Any]], confidence: float) -> dict[str, An
     return block
 
 
+def _source_localization(rows: list[dict[str, Any]], confidence: float) -> dict[str, Any]:
+    """Source error vs the independent manifest ground truth, reported apart.
+
+    Only clips with a genuine pipeline estimate (``sourceAvailable``) enter
+    the rate; clips that declare no source stay unavailable and never dilute
+    the denominator or masquerade as zero error.
+    """
+
+    available = [row for row in rows if row["sourceAvailable"]]
+    hits = sum(1 for row in available if row["sourceWithinTolerance"])
+    errors = [float(row["sourceErrorMm"]) for row in available if row["sourceErrorMm"] is not None]
+    block = _rate(hits, len(available), confidence)
+    mean_error = sum(errors) / len(errors) if errors else None
+    block["meanErrorMm"] = None if mean_error is None else round(mean_error, 2)
+    block["meanErrorDisplay"] = "n/a" if mean_error is None else f"{mean_error:.1f} mm"
+    block["available"] = len(available)
+    block["total"] = len(rows)
+    return block
+
+
 def _checkpoint_recovery(rows: list[dict[str, Any]], confidence: float) -> dict[str, Any]:
     attempted = [row for row in rows if row["checkpointCommitted"] is not None]
     committed = sum(1 for row in attempted if row["checkpointCommitted"])
@@ -152,6 +173,10 @@ def clip_row_payload(run: BenchRun) -> dict[str, Any]:
     row["localizedDisplay"] = "n/a" if localized is None else ("yes" if localized else "no")
     error_mm = row["localizationErrorMm"]
     row["localizationErrorDisplay"] = "—" if error_mm is None else f"{float(error_mm):.1f}"
+    source_error_mm = row["sourceErrorMm"]
+    row["sourceErrorDisplay"] = "—" if source_error_mm is None else f"{float(source_error_mm):.1f}"
+    source_within = row["sourceWithinTolerance"]
+    row["sourceDisplay"] = "n/a" if source_within is None else ("yes" if source_within else "no")
     row["valveVerifiedDisplay"] = (
         "n/a" if row["valveVerified"] is None else ("yes" if row["valveVerified"] else "no")
     )
@@ -173,6 +198,7 @@ def build_payload(
     git_sha: str,
     confidence: float = 0.95,
     generated_at: datetime | None = None,
+    fault_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     rows = [clip_row_payload(run) for run in runs]
     by_split: dict[str, list[dict[str, Any]]] = {"all": rows}
@@ -200,6 +226,8 @@ def build_payload(
                 "detectionSDisplay",
                 "localizedDisplay",
                 "localizationErrorDisplay",
+                "sourceErrorDisplay",
+                "sourceDisplay",
                 "valveVerifiedDisplay",
                 "checkpointDisplay",
             }
@@ -208,14 +236,34 @@ def build_payload(
     ]
     digest = run_hash(deterministic_rows, config_hash=config_hash, fusion_hash=fusion_hash)
 
+    if fault_summary is not None:
+        fault_block = dict(fault_summary)
+        fault_block["executed"] = True
+    else:
+        fault_block = {
+            "suite": "tests/test_bench_faults.py",
+            "executed": False,
+            "total": 0,
+            "passed": 0,
+            "separateFromScenarioMetrics": True,
+            "note": (
+                "Fault-injection cases were not executed for this run. They use "
+                "mocked inputs without video fixtures and are counted separately; "
+                "see tests/test_bench_faults.py."
+            ),
+            "cases": [],
+        }
+
     return {
         "schemaVersion": "1.0",
         "generatedAt": (generated_at or datetime.now(UTC)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
         + "Z",
         "deterministic": True,
         "note": (
-            "generatedAt is the only non-reproducible field; runHash covers the "
-            "config, freeze, and every clip row. Wall-clock latency is in latency.json."
+            "generatedAt and the informational gitSha are excluded from runHash, "
+            "which covers the config, freeze, and every clip row. Fault cases are "
+            "recorded separately and never enter the hash. Wall-clock latency is "
+            "in latency.json."
         ),
         "title": BENCHMARK_TITLE,
         "notice": SAMPLE_NOTICE,
@@ -232,6 +280,8 @@ def build_payload(
         "detectionLatencyS": _latency(detection_values, "s"),
         "localization": _localization(selected, confidence),
         "localizationToleranceMm": FITTING_RADIUS_MM,
+        "sourceLocalization": _source_localization(selected, confidence),
+        "faultInjection": fault_block,
         "checkpointRecovery": _checkpoint_recovery(selected, confidence),
         "valveIsolation": _valve_isolation(selected, confidence),
         "clips": rows,
@@ -250,6 +300,17 @@ def build_payload(
             "Localization error is measured at the decision frame; the simulated "
             "leak drifts 11 mm/s from QD-04, so the error includes the spill that "
             "accumulated before confirmation.",
+            "Source error compares the back-projected source hypothesis "
+            "(RunResult.source_estimate, method recorded per clip in "
+            "sourceMethod) with the independent manifest leak_source_mm, which "
+            "is declared in the scenario file — never derived from the "
+            "detector's QD ROI. The spill centroid is reported separately and "
+            "never as the origin. Clips with no genuine estimate report the "
+            "source fields as unavailable (None), never zero.",
+            "Fault-injection cases (tests/test_bench_faults.py, "
+            "src/cryoguard/bench/faults.py) use mocked inputs without video "
+            "fixtures and are counted separately; they never enter scenario "
+            "recall, localization, source error, or runHash.",
             "SAM ran in cache mode from a fixture-seeded cache (provenance=fixture); "
             "no hosted SAM call was made.",
             "Detection latency is scenario time from clip start to the decision. "
@@ -344,13 +405,66 @@ def render_markdown(payload: dict[str, Any]) -> str:
             f"| {block['precision']['display']} |"
         )
 
+    source = payload["sourceLocalization"]
+    lines += [
+        "",
+        "## Source estimation",
+        "",
+        "Back-projected source hypothesis vs the independent manifest "
+        f"`leak_source_mm`: {source['available']} of {source['total']} clips "
+        "produced a genuine estimate; the rest are unavailable, never zero. "
+        "The spill centroid above is the observation, not the origin.",
+        "",
+        (
+            f"| Metric | Measured Value | {payload['confidencePercent']}% Confidence Interval "
+            "(Clopper-Pearson) | Sample Count |"
+        ),
+        "| :--- | :--- | :--- | :--- |",
+        (
+            f"| **Source Within Tolerance (≤ {tolerance} mm)** | {source['display']} "
+            f"| {source['ciDisplay']} "
+            f"| {source['available']} estimated event{'s' if source['available'] != 1 else ''} |"
+        ),
+        (
+            f"| **Mean Source Error** | {source['meanErrorDisplay']} "
+            f"| — | {source['available']} estimated "
+            f"event{'s' if source['available'] != 1 else ''} |"
+        ),
+        "",
+        "## Fault injection",
+        "",
+    ]
+    faults = payload["faultInjection"]
+    if faults.get("executed"):
+        lines.append(
+            f"Deterministic fault-injection matrix `{faults['suite']}`: "
+            f"{faults['passed']}/{faults['total']} cases passing. Counted separately; "
+            "never merged into scenario metrics or runHash."
+        )
+        lines += [
+            "",
+            "| Case | Category | Result |",
+            "| :--- | :--- | :--- |",
+        ]
+        for case in faults.get("cases", []):
+            result = "pass" if case["passed"] else "FAIL"
+            lines.append(f"| {case['id']} | {case['category']} | {result} |")
+    else:
+        lines.append(
+            "Fault-injection cases were not executed for this run "
+            f"(`{faults['suite']}`). They use mocked inputs without video fixtures "
+            "and are counted separately; never merged into scenario metrics or runHash."
+        )
+
     lines += [
         "",
         "## Per clip",
         "",
         "| Clip | Split | Ground truth | Predicted | Label | Rule | P "
-        "| Detection (s) | Zone | Loc. error (mm) | Within tolerance | Actions |",
-        "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |",
+        "| Detection (s) | Zone | Loc. error (mm) | Within tolerance "
+        "| Src err (mm) | Src | Actions |",
+        "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- "
+        "| :--- | :--- | :--- | :--- | :--- |",
     ]
     for row in payload["clips"]:
         lines.append(
@@ -359,6 +473,7 @@ def render_markdown(payload: dict[str, Any]) -> str:
             f"| {row['ruleId']} | {row['pDisplay']} | {row['detectionSDisplay']} "
             f"| {row['zone'] if row['zone'] is not None else '—'} "
             f"| {row['localizationErrorDisplay']} | {row['localizedDisplay']} "
+            f"| {row['sourceErrorDisplay']} | {row['sourceDisplay']} "
             f"| {row['actionCount']} |"
         )
 

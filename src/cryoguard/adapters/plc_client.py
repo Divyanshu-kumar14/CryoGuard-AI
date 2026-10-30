@@ -13,9 +13,43 @@ Wire map, 0-based on the wire and matching ``sims/plc_server.py``:
 ``close_valve`` commands the spring-return close, then waits for isolation: the
 limit switch alone only proves the stem moved. A valve with blown seals or a
 charged bypass can sit on its limit switch while coolant keeps reaching the
-chassis, so the close is not confirmed until DI 1 reads depressurized or HR 0
-reads at or below ``depressurized_max_psi``. A stem that closes onto a still
-pressurized line is ``VALVE_SEAL_LEAK`` and the FSM cuts node power.
+chassis, so the close is not confirmed until DI 1 reads depressurized AND HR 0
+reads at or below ``depressurized_max_psi`` on ``depressurize_confirm_reads``
+consecutive polls. Either witness alone is not isolation. A stem that closes
+onto a still pressurized line is ``VALVE_SEAL_LEAK`` and the FSM cuts node
+power.
+
+Isolation policy truth table (limit = DI 0, di = DI 1, p = HR 0 pressure,
+lo = ``depressurized_max_psi``, hi = lo + ``depressurize_hysteresis_psi``):
+
+    1. limit open                    -> not isolated, keep waiting (Phase 1
+                                        deadline) / reopen FAULT in Phase 2
+    2. limit closed, !di, p >= hi    -> both agree pressurized: waiting; on
+                                        timeout VALVE_SEAL_LEAK, never VERIFIED
+    3. limit closed, di, p >= hi     -> DI claims depressurized, pressure
+                                        refutes it: SENSOR_DISAGREEMENT (FAULT
+                                        class, never VERIFIED), immediate
+    4. limit closed, !di, p <= lo    -> pressure claims depressurized, DI
+                                        refutes it: SENSOR_DISAGREEMENT,
+                                        immediate, never VERIFIED
+    5. limit closed, di, p <= lo     -> both agree depressurized: confirm vote;
+                                        VERIFIED only after N consecutive
+                                        agreeing reads (stabilization)
+    6. DI read error (unavailable)   -> SENSOR_DISAGREEMENT, never VERIFIED
+    7. pressure read error (unavail) -> SENSOR_DISAGREEMENT, never VERIFIED
+    8. transport error / disconnect  -> FAULT via read-error / exception path,
+                                        never VERIFIED
+    9. p in (lo, hi) fluctuation     -> ambiguous band: reset the confirm
+                                        counter, keep waiting; hysteresis
+                                        (confirm <= lo, refute >= hi) stops a
+                                        single threshold touch from verifying;
+                                        timeout without N confirms is
+                                        VALVE_SEAL_LEAK, never VERIFIED
+   10. limit reopens mid-verify      -> FAULT ("limit switch reopened"),
+                                        never VERIFIED (already handled, kept)
+
+DI 1 is treated only as an independent depressurization witness that must agree
+with HR 0; no new physical meaning is assigned to it.
 
 The travel time is measured from the coil write, not from process start, so a
 slow TCP handshake cannot turn a VERIFIED close into VERIFIED_SLOW. A transport
@@ -37,6 +71,8 @@ from cryoguard.orchestrator.incident_fsm import ValveResult
 
 DEFAULT_DEPRESSURIZED_MAX_PSI = 5.0
 DEFAULT_DEPRESSURIZE_TIMEOUT_MS = 1500
+DEFAULT_DEPRESSURIZE_CONFIRM_READS = 3
+DEFAULT_DEPRESSURIZE_HYSTERESIS_PSI = 2.0
 
 
 class PlcClientError(ValueError):
@@ -100,6 +136,12 @@ class PlcClient:
         self.depressurize_timeout_s = (
             float(cfg.get("depressurize_timeout_ms", DEFAULT_DEPRESSURIZE_TIMEOUT_MS)) / 1000.0
         )
+        self.depressurize_confirm_reads = int(
+            cfg.get("depressurize_confirm_reads", DEFAULT_DEPRESSURIZE_CONFIRM_READS)
+        )
+        self.depressurize_hysteresis_psi = float(
+            cfg.get("depressurize_hysteresis_psi", DEFAULT_DEPRESSURIZE_HYSTERESIS_PSI)
+        )
         if self.port <= 0 or self.port > 65535:
             raise PlcClientError(f"invalid PLC port: {self.port}")
         if self.poll_s <= 0:
@@ -112,6 +154,15 @@ class PlcClient:
             raise PlcClientError(
                 "depressurize_timeout_ms must be non-negative: "
                 f"{self.depressurize_timeout_s * 1000}"
+            )
+        if self.depressurize_confirm_reads < 1:
+            raise PlcClientError(
+                f"depressurize_confirm_reads must be >= 1: {self.depressurize_confirm_reads}"
+            )
+        if self.depressurize_hysteresis_psi < 0:
+            raise PlcClientError(
+                "depressurize_hysteresis_psi must be non-negative: "
+                f"{self.depressurize_hysteresis_psi}"
             )
 
     def _connect(self) -> ModbusTcpClient:
@@ -159,10 +210,36 @@ class PlcClient:
 
         Stem closure and depressurization are separate facts. A valve with blown
         internal seals or a charged bypass closes its limit switch while the line
-        stays pressurized, so only DI 1 (depressurized) or a pressure readback at
-        or below ``depressurized_max_psi`` confirms isolation. If the pressure
-        stays above the limit for ``depressurize_timeout_ms`` the close is a
-        ``VALVE_SEAL_LEAK``, never a VERIFIED close.
+        stays pressurized. Isolation requires the limit switch closed AND both
+        depressurization witnesses agreeing: DI 1 reads depressurized AND HR 0
+        reads at or below ``depressurized_max_psi``, on
+        ``depressurize_confirm_reads`` consecutive polls. Either witness alone
+        is never isolation.
+
+        Disagreement policy (lo = max, hi = max + hysteresis):
+
+        * DI claims depressurized while pressure refutes it (p >= hi) is a
+          hard contradiction: it cannot be a normal depressurization transient
+          (a healthy close drives pressure low before DI flips), so it returns
+          ``SENSOR_DISAGREEMENT`` immediately.
+        * Pressure claims depressurized (p <= lo) while DI still disagrees can
+          be the normal transient: the simulator drops pressure to 0.0 at stem
+          closure while DI flips ``depressurize_ms`` later. It is therefore
+          treated as "not yet proven": the confirm counter resets and polling
+          continues. If it persists until the timeout it returns
+          ``SENSOR_DISAGREEMENT``, never VERIFIED.
+        * Both agree pressurized (!di, p > lo) is "not yet isolated": polling
+          continues; on timeout it is ``VALVE_SEAL_LEAK``, never VERIFIED.
+        * The hysteresis deadband (lo, hi) is ambiguous: it resets the confirm
+          counter and keeps waiting, so a single threshold touch or fluctuation
+          cannot verify. Timeout without N consecutive agreeing reads is
+          ``VALVE_SEAL_LEAK`` (or ``SENSOR_DISAGREEMENT`` when DI was claiming
+          depressurized), never VERIFIED.
+        * A single-channel read error (DI or pressure unavailable) is
+          ``SENSOR_DISAGREEMENT``, never VERIFIED. A control-path read error
+          (coils) or a transport exception/disconnect is ``FAULT``.
+        * A reopened limit switch mid-verify is ``FAULT``: any pressure drop
+          came from somewhere else.
         """
 
         # Phase 1: the stem must reach its limit switch inside the travel window.
@@ -207,15 +284,37 @@ class PlcClient:
 
         # Phase 2: the stem is closed, the line is not yet proven isolated.
         deadline = time.monotonic() + self.depressurize_timeout_s
+        lo_psi = self.depressurized_max_psi
+        hi_psi = lo_psi + self.depressurize_hysteresis_psi
+        needed = self.depressurize_confirm_reads
+        confirm_count = 0
+        last_pressure_psi = float("nan")
+        last_di = False
         while True:
             coils = client.read_coils(0, count=3, device_id=self.unit_id)
             discrete = client.read_discrete_inputs(0, count=2, device_id=self.unit_id)
             registers = client.read_holding_registers(0, count=1, device_id=self.unit_id)
-            if coils.isError() or discrete.isError() or registers.isError():
+            if coils.isError():
                 return ValveResult(
                     status=ValveStatus.FAULT,
                     travel_ms=travel_ms,
                     detail="read failed while verifying depressurization",
+                    nominal_ms=self.nominal_ms,
+                )
+            if discrete.isError():
+                return ValveResult(
+                    status=ValveStatus.SENSOR_DISAGREEMENT,
+                    travel_ms=travel_ms,
+                    detail="DI unavailable while verifying depressurization; "
+                    "isolation unproven, never VERIFIED",
+                    nominal_ms=self.nominal_ms,
+                )
+            if registers.isError():
+                return ValveResult(
+                    status=ValveStatus.SENSOR_DISAGREEMENT,
+                    travel_ms=travel_ms,
+                    detail="pressure unavailable while verifying depressurization; "
+                    "isolation unproven, never VERIFIED",
                     nominal_ms=self.nominal_ms,
                 )
             if coils.bits[2]:
@@ -234,20 +333,67 @@ class PlcClient:
                     nominal_ms=self.nominal_ms,
                 )
             pressure_psi = _pressure_psi(registers.registers[0])
-            if discrete.bits[1] or pressure_psi <= self.depressurized_max_psi:
+            last_pressure_psi = pressure_psi
+            di_depressurized = bool(discrete.bits[1])
+            last_di = di_depressurized
+            pressure_low = pressure_psi <= lo_psi
+            pressure_high = pressure_psi >= hi_psi
+
+            if di_depressurized and pressure_high:
+                # Hard contradiction: DI claims depressurized while pressure
+                # refutes it. Never VERIFIED.
                 return ValveResult(
-                    status=status,
+                    status=ValveStatus.SENSOR_DISAGREEMENT,
                     travel_ms=travel_ms,
-                    detail=f"limit switch closed and line depressurized; band {status.value}",
+                    detail=(
+                        "sensor disagreement: DI claims depressurized but pressure "
+                        f"{pressure_psi:.1f} PSI >= {hi_psi:.1f} PSI "
+                        f"(max {lo_psi:.1f} + hyst {self.depressurize_hysteresis_psi:.1f}); "
+                        "isolation unproven, never VERIFIED"
+                    ),
                     nominal_ms=self.nominal_ms,
                 )
+            if di_depressurized and pressure_low:
+                confirm_count += 1
+                if confirm_count >= needed:
+                    return ValveResult(
+                        status=status,
+                        travel_ms=travel_ms,
+                        detail=(
+                            f"limit switch closed and line depressurized; band {status.value}; "
+                            f"{confirm_count} consecutive agreeing reads "
+                            f"(pressure {pressure_psi:.1f} PSI <= {lo_psi:.1f} PSI, DI agreed)"
+                        ),
+                        nominal_ms=self.nominal_ms,
+                    )
+            else:
+                # Either both agree pressurized, the deadband, or the normal
+                # transient (pressure low before DI flips): not proven, keep
+                # waiting. A single touch cannot verify.
+                confirm_count = 0
             if time.monotonic() >= deadline:
+                if last_di or last_pressure_psi <= lo_psi:
+                    # A witness claimed depressurized but agreement never
+                    # stabilized (fluctuation, stuck DI, or pressure-low/DI-low
+                    # persistence). Disagreement, never VERIFIED.
+                    return ValveResult(
+                        status=ValveStatus.SENSOR_DISAGREEMENT,
+                        travel_ms=travel_ms,
+                        detail=(
+                            "sensor disagreement: depressurization never stabilized with "
+                            f"{needed} consecutive agreeing reads "
+                            f"(last pressure {last_pressure_psi:.1f} PSI, "
+                            f"DI={'depressurized' if last_di else 'pressurized'}); "
+                            "isolation unproven, never VERIFIED"
+                        ),
+                        nominal_ms=self.nominal_ms,
+                    )
                 return ValveResult(
                     status=ValveStatus.VALVE_SEAL_LEAK,
                     travel_ms=travel_ms,
                     detail=(
-                        f"limit switch closed but pressure {pressure_psi:.1f} PSI > "
-                        f"{self.depressurized_max_psi:.1f} PSI after "
+                        f"limit switch closed but pressure {last_pressure_psi:.1f} PSI > "
+                        f"{lo_psi:.1f} PSI after "
                         f"{self.depressurize_timeout_s * 1000:.0f} ms"
                     ),
                     nominal_ms=self.nominal_ms,

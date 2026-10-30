@@ -21,6 +21,10 @@
       "expectedZone": 2,
       "frames": 229,
       "groundTruthLabel": "CONFIRMED_LEAK",
+      "groundTruthSourceMm": [
+        195.0,
+        145.0
+      ],
       "label": "CONFIRMED_LEAK",
       "localizable": true,
       "localizationErrorDisplay": "52.8",
@@ -33,6 +37,16 @@
       "ruleId": "R2",
       "scenario": "slow_leak_qd4",
       "sequenceState": "RESOLVED_PENDING_REPAIR",
+      "sourceAvailable": true,
+      "sourceDisplay": "yes",
+      "sourceErrorDisplay": "0.4",
+      "sourceErrorMm": 0.42,
+      "sourceEstimateMm": [
+        195.4,
+        145.2
+      ],
+      "sourceMethod": "earliest-highq-backproject-v1",
+      "sourceWithinTolerance": true,
       "split": "dev",
       "suspectedOrigin": "QD-04 (Zone 0)",
       "ticks": 75,
@@ -52,6 +66,7 @@
       "expectedZone": 1,
       "frames": 600,
       "groundTruthLabel": "BENIGN_CONDENSATION",
+      "groundTruthSourceMm": null,
       "label": "NOMINAL",
       "localizable": false,
       "localizationErrorDisplay": "\u2014",
@@ -64,6 +79,13 @@
       "ruleId": "R7",
       "scenario": "condensation_bead",
       "sequenceState": null,
+      "sourceAvailable": false,
+      "sourceDisplay": "n/a",
+      "sourceErrorDisplay": "\u2014",
+      "sourceErrorMm": null,
+      "sourceEstimateMm": null,
+      "sourceMethod": "",
+      "sourceWithinTolerance": null,
       "split": "dev",
       "suspectedOrigin": "",
       "ticks": 40,
@@ -83,6 +105,7 @@
       "expectedZone": 2,
       "frames": 600,
       "groundTruthLabel": "SUSPECT_LEAK",
+      "groundTruthSourceMm": null,
       "label": "NOMINAL",
       "localizable": false,
       "localizationErrorDisplay": "\u2014",
@@ -95,6 +118,13 @@
       "ruleId": "R7",
       "scenario": "glint_noise",
       "sequenceState": null,
+      "sourceAvailable": false,
+      "sourceDisplay": "n/a",
+      "sourceErrorDisplay": "\u2014",
+      "sourceErrorMm": null,
+      "sourceEstimateMm": null,
+      "sourceMethod": "",
+      "sourceWithinTolerance": null,
       "split": "test",
       "suspectedOrigin": "",
       "ticks": 100,
@@ -114,6 +144,7 @@
       "expectedZone": 0,
       "frames": 106,
       "groundTruthLabel": "HIDDEN_HYDRAULIC_EVENT",
+      "groundTruthSourceMm": null,
       "label": "HIDDEN_HYDRAULIC_EVENT",
       "localizable": false,
       "localizationErrorDisplay": "\u2014",
@@ -126,6 +157,13 @@
       "ruleId": "R4",
       "scenario": "hidden_hydraulic",
       "sequenceState": null,
+      "sourceAvailable": false,
+      "sourceDisplay": "n/a",
+      "sourceErrorDisplay": "\u2014",
+      "sourceErrorMm": null,
+      "sourceEstimateMm": null,
+      "sourceMethod": "",
+      "sourceWithinTolerance": null,
       "split": "test",
       "suspectedOrigin": "QD-04 (no visual candidate)",
       "ticks": 8,
@@ -136,7 +174,7 @@
   ],
   "confidence": 0.95,
   "confidencePercent": 95,
-  "configHash": "1ce8a0508d6fddc5",
+  "configHash": "f0781ebc586322ce",
   "detectionLatencyS": {
     "display": "5.55 s \u00b1 2.90 s",
     "mean": 5.55,
@@ -148,9 +186,85 @@
     ]
   },
   "deterministic": true,
+  "faultInjection": {
+    "cases": [
+      {
+        "category": "perception",
+        "detail": "no incident, localization unavailable (None)",
+        "id": "camera-degraded",
+        "passed": true
+      },
+      {
+        "category": "perception",
+        "detail": "row built; SAM stages report n=0, latency non-deterministic",
+        "id": "sam-timeout",
+        "passed": true
+      },
+      {
+        "category": "perception",
+        "detail": "decision fallback preserved (NOMINAL, p=0.12)",
+        "id": "sam-malformed",
+        "passed": true
+      },
+      {
+        "category": "actuation",
+        "detail": "valve_verified=False with detection_s kept",
+        "id": "plc-disconnect",
+        "passed": true
+      },
+      {
+        "category": "actuation",
+        "detail": "valve_verified=False without limit-switch readback",
+        "id": "valve-seal-leak",
+        "passed": true
+      },
+      {
+        "category": "actuation",
+        "detail": "FAILED_SAFE preserved; unverified attempt kept, no success claimed",
+        "id": "bmc-poweroff-unverified",
+        "passed": true
+      },
+      {
+        "category": "telemetry",
+        "detail": "detection_s=None with ticks preserved",
+        "id": "stale-telemetry",
+        "passed": true
+      },
+      {
+        "category": "telemetry",
+        "detail": "SENSOR_FROZEN tripped only after all channels stayed stuck",
+        "id": "frozen-sensor",
+        "passed": true
+      },
+      {
+        "category": "recovery",
+        "detail": "corrupt=False distinguished from missing=None",
+        "id": "checkpoint-corrupt",
+        "passed": true
+      },
+      {
+        "category": "safety",
+        "detail": "primary failed, fallback attempted and verified, actuated never claimed",
+        "id": "watchdog-primary-failed",
+        "passed": true
+      },
+      {
+        "category": "safety",
+        "detail": "FAILED_SAFE with both failed attempts recorded",
+        "id": "watchdog-fallback-failed",
+        "passed": true
+      }
+    ],
+    "executed": true,
+    "note": "Deterministic fault-injection cases with mocked inputs (no video fixtures). Counted separately; never merged into scenario recall, localization, or runHash.",
+    "passed": 11,
+    "separateFromScenarioMetrics": true,
+    "suite": "tests/test_bench_faults.py",
+    "total": 11
+  },
   "fusionHash": "164849b04a9afb87",
-  "generatedAt": "2026-10-30T19:28:50.482Z",
-  "gitSha": "a777b44",
+  "generatedAt": "2026-10-30T21:26:15.907Z",
+  "gitSha": "5713b4b",
   "headline": {
     "falsePositiveRate": {
       "ciDisplay": "[0.0%, 84.2%]",
@@ -193,6 +307,8 @@
     "PLC, BMC, NVML, Slurm, and telemetry are simulators; the in-memory transport was used for this run.",
     "Localization is geometric: the candidate centroid in rectified chassis millimetres is compared with the configured QD-04 ROI centre. A matching origin string is no longer accepted as localization.",
     "Localization error is measured at the decision frame; the simulated leak drifts 11 mm/s from QD-04, so the error includes the spill that accumulated before confirmation.",
+    "Source error compares the back-projected source hypothesis (RunResult.source_estimate, method recorded per clip in sourceMethod) with the independent manifest leak_source_mm, which is declared in the scenario file \u2014 never derived from the detector's QD ROI. The spill centroid is reported separately and never as the origin. Clips with no genuine estimate report the source fields as unavailable (None), never zero.",
+    "Fault-injection cases (tests/test_bench_faults.py, src/cryoguard/bench/faults.py) use mocked inputs without video fixtures and are counted separately; they never enter scenario recall, localization, source error, or runHash.",
     "SAM ran in cache mode from a fixture-seeded cache (provenance=fixture); no hosted SAM call was made.",
     "Detection latency is scenario time from clip start to the decision. Wall-clock stage samples are in latency.json.",
     "The sequence timing is in-memory transport; the Modbus/Redfish socket path is exercised by tests/test_closed_loop.py."
@@ -316,12 +432,25 @@
       "tp": 1
     }
   },
-  "note": "generatedAt is the only non-reproducible field; runHash covers the config, freeze, and every clip row. Wall-clock latency is in latency.json.",
-  "notice": "Notice: Sample size n=4 across four synthetic benchmark fixtures. These results establish deterministic reproducibility across specified physical failure modes, not statistical generalization across unmodeled data center environments.",
-  "runHash": "0b2d56ddf07d65669f09070c21237c267457aa81551939cce7fa9b67545a1fa2",
+  "note": "generatedAt and the informational gitSha are excluded from runHash, which covers the config, freeze, and every clip row. Fault cases are recorded separately and never enter the hash. Wall-clock latency is in latency.json.",
+  "notice": "Notice: Sample size n=4 across four synthetic benchmark fixtures. These results are deterministic regression verification of specified failure modes \u2014 recall X/Y with exact Clopper-Pearson intervals \u2014 not population performance estimates and not evidence of generalization to unmodeled data center environments.",
+  "runHash": "98ac032bc7dc8b3d52954ef5d67f1da6e660c972e1aeb2e052ab3640b429d858",
   "schemaVersion": "1.0",
+  "sourceLocalization": {
+    "available": 1,
+    "ciDisplay": "[2.5%, 100.0%]",
+    "ciHigh": 1.0,
+    "ciLow": 0.025000000000000022,
+    "display": "100.0% (1/1)",
+    "k": 1,
+    "meanErrorDisplay": "0.4 mm",
+    "meanErrorMm": 0.42,
+    "n": 1,
+    "rate": 1.0,
+    "total": 4
+  },
   "split": "all",
-  "title": "Deterministic Regression & Safety Verification Suite (4 Physical Scenarios)",
+  "title": "Deterministic Regression & Safety Verification Suite (4 Synthetic Scenarios)",
   "valveIsolation": {
     "ciDisplay": "[2.5%, 100.0%]",
     "ciHigh": 1.0,

@@ -78,13 +78,21 @@ def main(argv: list[str] | None = None) -> int:
     )
     if result.sam is not None:
         sam = result.sam
-        source = "fixture" if sam.fixture else "api"
         print(
             f"sam       {sam.mode}: {sam.applied} masks, {sam.cached} cached, "
-            f"{sam.live} live, {sam.failures} failures ({source})"
+            f"{sam.live} live, {sam.failures} failures, {sam.stale} stale "
+            f"(provenance: fixture={sam.fixture} api={sam.api})"
         )
         if sam.mode == "cache" and sam.fixture == sam.applied and sam.applied:
             print("sam       provenance=fixture (seeded from the deterministic mask; no API call)")
+        if sam.mode == "live" and sam.api:
+            print(f"sam       provenance=api ({sam.api} hosted masks; live n={sam.live})")
+        if sam.mode == "live" and sam.failures:
+            print(
+                "sam       the configured coolant prompt returned "
+                "zero matches or failed; see SamStats failures "
+                "(the default prompt is kept, not replaced on yield)"
+            )
 
     if result.report is None or result.decision is None:
         print(f"outcome   no incident in {result.ticks} ticks ({result.frames} frames)")

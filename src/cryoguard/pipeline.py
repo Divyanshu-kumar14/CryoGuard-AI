@@ -14,8 +14,10 @@ Order inside a tick matters:
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -47,14 +49,27 @@ from cryoguard.orchestrator.adapters import (
     SimulatedScheduler,
 )
 from cryoguard.orchestrator.emergency import EmergencySequence
-from cryoguard.orchestrator.incident_fsm import ConfirmedLeakOrchestrator, SequenceStep
+from cryoguard.orchestrator.incident_fsm import (
+    VERIFIED_OFF,
+    ConfirmedLeakOrchestrator,
+    PowerResult,
+    SequenceStep,
+)
 from cryoguard.orchestrator.watchdog import (
+    Actuate,
     NvmlJunctionSensor,
     ThermalWatchdog,
     TripRecord,
+    WatchdogActuationError,
     WatchdogTrip,
 )
-from cryoguard.perception.candidates import Candidate, CandidateManager
+from cryoguard.perception.candidates import (
+    Candidate,
+    CandidateManager,
+    SourceEstimate,
+    fitting_centre_mm,
+    ground_truth_source_mm,
+)
 from cryoguard.perception.health import assess_health
 from cryoguard.perception.sam_client import SamClient
 from cryoguard.perception.sam_worker import SamStats, SamWorker
@@ -66,6 +81,8 @@ from cryoguard.report.writer import write_incident
 from cryoguard.telemetry.replay import TelemetryReplay, TelemetrySample
 
 ROOT = Path(__file__).resolve().parents[2]
+
+logger = logging.getLogger(__name__)
 SCENARIOS = {
     "leak": "slow_leak_qd4",
     "condensation": "condensation_bead",
@@ -103,6 +120,12 @@ class SamSummary:
     failures: int
     skipped: int
     regions: int
+    api: int = 0
+    stale: int = 0
+    # Per-prompt audit, sorted by prompt: each entry carries submitted,
+    # applied, empty (valid zero-match), and failures. Empty defaults keep
+    # older call sites working.
+    per_prompt: tuple[dict[str, Any], ...] = ()
     cached_ms: tuple[float, ...] = ()
     live_ms: tuple[float, ...] = ()
 
@@ -118,6 +141,11 @@ class SamSummary:
             failures=stats.failures,
             skipped=stats.skipped,
             regions=stats.regions,
+            api=stats.api,
+            stale=stats.stale,
+            per_prompt=tuple(
+                {"prompt": prompt, **counts} for prompt, counts in sorted(stats.per_prompt.items())
+            ),
             cached_ms=tuple(stats.cached_ms),
             live_ms=tuple(stats.live_ms),
         )
@@ -148,8 +176,12 @@ class RunResult:
     timing: TimingSamples = TimingSamples()
     # Candidate centroid in rectified chassis millimetres at decision time. The
     # benchmark turns it into a geometric localization error; None when no
-    # candidate was localised (e.g. a hydraulic-only incident).
+    # candidate was localised (e.g. a hydraulic-only incident). This is the
+    # OBSERVED SPILL position — it drifts downstream as the spill spreads and
+    # must not be read as the leak source. The source hypothesis, when the
+    # track history supports one, lives in source_estimate alongside.
     centroid_mm: tuple[float, float] | None = None
+    source_estimate: SourceEstimate | None = None
 
 
 def resolve_scenario(name: str) -> str:
@@ -161,6 +193,30 @@ def load_scenario(name: str) -> dict[str, Any]:
     if not path.is_file():
         raise PipelineError(f"unknown scenario: {name} ({path})")
     return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
+def _ground_truth_mm(scenario: dict[str, Any]) -> tuple[float, float] | None:
+    """Independent ground-truth source from the scenario manifest.
+
+    Reads ``leak_source_mm`` when the manifest declares it, else None. Never
+    derived from the detector's QD ROI configuration.
+    """
+
+    return ground_truth_source_mm(scenario)
+
+
+def _fitting_mm(topology: dict[str, Any], scenario: dict[str, Any]) -> tuple[float, float] | None:
+    """Configured fitting location: QD ROI centre from the topology file.
+
+    Detector configuration for the proximity flag only — explicitly not
+    ground truth, which comes from the manifest via _ground_truth_mm.
+    """
+
+    expected = scenario.get("expected", {})
+    qd_id = str(expected.get("qd", "")) if isinstance(expected, dict) else ""
+    if not qd_id:
+        return None
+    return fitting_centre_mm(topology, qd_id)
 
 
 def _incident_time(cfg: dict[str, Any], t_s: float) -> datetime:
@@ -267,7 +323,10 @@ def _step_emitter(bus: EventBus, protocol: str) -> StepCallback:
 
 
 def _run_memory_sequence(
-    decision_t: float, cfg: dict[str, Any], on_step: StepCallback | None = None
+    decision_t: float,
+    cfg: dict[str, Any],
+    on_step: StepCallback | None = None,
+    abort: Callable[[], str | None] | None = None,
 ) -> tuple[list[ActionModel], IncidentState]:
     """No sockets: the same FSM with in-memory ports (unit tests, offline CI)."""
 
@@ -286,6 +345,7 @@ def _run_memory_sequence(
         scheduler=SimulatedScheduler(cfg["scheduler"]),
         clamp_latency_ms=get(cfg, "orchestrator.clamp_latency_ms"),
         on_step=on_step,
+        abort=abort,
     )
     fsm = orchestrator.run()
     return _steps_to_actions(orchestrator.steps), fsm.state
@@ -297,6 +357,7 @@ def _run_live_sequence(
     endpoints: SimEndpoints,
     checkpoint_dir: str | Path | None,
     on_step: StepCallback | None = None,
+    abort: Callable[[], str | None] | None = None,
 ) -> tuple[list[ActionModel], IncidentState]:
     """Real Modbus-TCP and Redfish clients; the blocking run happens in a thread."""
 
@@ -320,6 +381,7 @@ def _run_live_sequence(
         scheduler=SchedulerAdapter(cfg["scheduler"]),
         clamp_latency_ms=float(get(cfg, "orchestrator.clamp_latency_ms")),
         on_step=on_step,
+        abort=abort,
     )
     fsm = orchestrator.run()
     return _steps_to_actions(orchestrator.steps), fsm.state
@@ -331,15 +393,16 @@ async def _confirmed_leak_actions(
     checkpoint_dir: str | Path | None,
     mode: str,
     on_step: StepCallback | None = None,
+    abort: Callable[[], str | None] | None = None,
 ) -> tuple[list[ActionModel], IncidentState]:
     if mode == "memory":
-        return _run_memory_sequence(decision_t, cfg, on_step)
+        return _run_memory_sequence(decision_t, cfg, on_step, abort)
     if mode == "loopback":
         # The PLC ticker and the BMC server live on this event loop. The blocking
         # clients must run in a worker thread or the simulation would deadlock.
         async with loopback_simulators(cfg) as endpoints:
             return await asyncio.to_thread(
-                _run_live_sequence, decision_t, cfg, endpoints, checkpoint_dir, on_step
+                _run_live_sequence, decision_t, cfg, endpoints, checkpoint_dir, on_step, abort
             )
     if mode == "external":
         return await asyncio.to_thread(
@@ -349,6 +412,7 @@ async def _confirmed_leak_actions(
             SimEndpoints.from_config(cfg),
             checkpoint_dir,
             on_step,
+            abort,
         )
     raise PipelineError(
         f"unknown orchestrator.protocol_mode {mode!r} (expected memory, loopback, or external)"
@@ -412,6 +476,133 @@ def _run_emergency_live(
     return _steps_to_actions(result.steps), result.state
 
 
+def _fallback_verified(power: PowerResult) -> bool:
+    """Off is only claimed after a readback, never on a bare HTTP accept.
+
+    A live ``RedfishClient.force_off`` already polls ``PowerState`` and reports
+    ``ok`` solely with ``status == VERIFIED_OFF``; an accepted-but-unverified
+    reset returns ``ok=False`` and fails here. The in-memory BMC has no socket
+    to poll, so its deterministic ``ok + Off + simulated`` verdict counts as
+    verified without a status string.
+    """
+
+    return power.ok and power.state == "Off" and (power.simulated or power.status == VERIFIED_OFF)
+
+
+async def _watchdog_fallback_actuation(
+    reason: WatchdogTrip,
+    detail: str,
+    cfg: dict[str, Any],
+    protocol: str,
+) -> None:
+    """Independent last-resort power cut after the primary actuation failed.
+
+    Sequence: primary begins -> primary fails -> trip initiated -> this runs a
+    direct BMC ForceOff on a connection the primary never touched -> the
+    readback must confirm ``PowerState == Off``. Anything unverified raises so
+    the watchdog records the fallback as failed and the incident stays
+    unsuccessful (FAILED_SAFE, escalated) instead of reporting a power cut
+    nobody confirmed.
+    """
+
+    if protocol == "memory":
+        power = await asyncio.to_thread(SimulatedBmc().force_off)
+    elif protocol == "loopback":
+        # Own simulators and own client: the failed primary's endpoints and
+        # connection are already torn down, never reused.
+        async with loopback_simulators(cfg) as endpoints:
+            client = RedfishClient(cfg["bmc"], base_url=endpoints.bmc_url)
+            power = await asyncio.to_thread(client.force_off)
+    elif protocol == "external":
+        # Fresh client per attempt: no shared httpx connection or BMC state.
+        client = RedfishClient(cfg["bmc"], base_url=SimEndpoints.from_config(cfg).bmc_url)
+        power = await asyncio.to_thread(client.force_off)
+    else:
+        raise PipelineError(f"unknown orchestrator.protocol_mode {protocol!r}")
+    if not _fallback_verified(power):
+        raise RuntimeError(
+            "watchdog fallback could not verify power off: "
+            f"ok={power.ok} state={power.state} "
+            f"status={power.status or 'UNVERIFIED'} detail={power.detail}"
+        )
+    logger.critical("Watchdog fallback verified node power off for %s: %s", reason.value, detail)
+
+
+def _watchdog_fallback(protocol: str, cfg: dict[str, Any]) -> Actuate:
+    """Build the composition-root fallback: an independent BMC path per mode."""
+
+    async def fallback(reason: WatchdogTrip, detail: str) -> None:
+        await _watchdog_fallback_actuation(reason, detail, cfg, protocol)
+
+    return fallback
+
+
+def _failed_trip_actions(
+    watchdog: ThermalWatchdog,
+    t_s: float,
+    primary: list[ActionModel],
+) -> list[ActionModel]:
+    """Honest record of an initiated-but-unconfirmed trip.
+
+    Whatever the primary managed before failing is kept first; then the trip
+    initiation, the primary failure, and the independent fallback outcome are
+    appended so the report shows exactly what was verified and what was not.
+    """
+
+    actions = list(primary)
+    trip = watchdog.trip
+    if trip is not None:
+        actions.append(
+            _action(
+                len(actions) + 1,
+                t_s,
+                "WATCHDOG",
+                "TRIP",
+                "INITIATED",
+                f"{trip.reason.value}: {trip.detail}",
+            )
+        )
+    if watchdog.actuation_error:
+        actions.append(
+            _action(len(actions) + 1, t_s, "BMC", "FORCE_OFF", "FAILED", watchdog.actuation_error)
+        )
+    if watchdog.fallback_attempted:
+        if watchdog.fallback_ok:
+            actions.append(
+                _action(
+                    len(actions) + 1,
+                    t_s,
+                    "BMC",
+                    "FORCE_OFF_FALLBACK",
+                    VERIFIED_OFF,
+                    "independent path verified PowerState=Off",
+                )
+            )
+        else:
+            actions.append(
+                _action(
+                    len(actions) + 1,
+                    t_s,
+                    "BMC",
+                    "FORCE_OFF_FALLBACK",
+                    "FAILED",
+                    watchdog.fallback_error or "power off unverified",
+                )
+            )
+    elif watchdog.fallback is None:
+        actions.append(
+            _action(
+                len(actions) + 1,
+                t_s,
+                "WATCHDOG",
+                "FALLBACK",
+                "UNAVAILABLE",
+                "no fallback actuator; escalated to supervisor",
+            )
+        )
+    return actions
+
+
 async def _actions_for(
     decision: Decision,
     t_s: float,
@@ -419,9 +610,10 @@ async def _actions_for(
     checkpoint_dir: str | Path | None,
     protocol: str,
     on_step: StepCallback | None = None,
+    abort: Callable[[], str | None] | None = None,
 ) -> tuple[list[ActionModel], IncidentState | None]:
     if decision.label is SystemLabel.CONFIRMED_LEAK:
-        return await _confirmed_leak_actions(t_s, cfg, checkpoint_dir, protocol, on_step)
+        return await _confirmed_leak_actions(t_s, cfg, checkpoint_dir, protocol, on_step, abort)
 
     if decision.label is SystemLabel.EMERGENCY_TRIP:
         # R1: no checkpoint wait and no requeue. The hardware condition is the trigger.
@@ -499,6 +691,13 @@ async def run_scenario(
     clip = ROOT / scenario["clip"]
     if not clip.is_file():
         raise PipelineError(f"clip not found: {clip}")
+    # Kept separate on purpose: the fitting location is detector configuration
+    # (topology QD ROI), the ground truth is an independent manifest field.
+    # Either may be None; a missing ground truth never blocks the estimate,
+    # it only leaves the error fields empty.
+    fitting_mm = _fitting_mm(topology, scenario)
+    ground_truth_mm = _ground_truth_mm(scenario)
+    hydraulic_confirm_phi = float(get(cfg, "decision.hydraulic_confirm_phi"))
 
     px_per_mm = float(get(cfg, "camera.px_per_mm"))
     canvas = (
@@ -521,6 +720,19 @@ async def run_scenario(
     telemetry = TelemetryReplay(scenario)
     engine = HysteresisDecision(cfg)
     policy = SamplingPolicy(cfg["perception"])
+
+    def _source_for(candidate: Candidate | None, phi_h_value: float) -> SourceEstimate | None:
+        """Source hypothesis for the chosen candidate, if its history allows one."""
+
+        if candidate is None:
+            return None
+        return sampler.estimate_source(
+            candidate.track_id,
+            fitting_mm=fitting_mm,
+            ground_truth_mm=ground_truth_mm,
+            hydraulic_corroborated=bool(phi_h_value >= hydraulic_confirm_phi),
+        )
+
     emit_step: StepCallback | None = _step_emitter(bus, protocol) if bus is not None else None
     if bus is not None:
         bus.bind(asyncio.get_running_loop())
@@ -553,6 +765,7 @@ async def run_scenario(
     watchdog: ThermalWatchdog | None = None
     watchdog_task: asyncio.Task[TripRecord | None] | None = None
     watchdog_stop = asyncio.Event()
+    watchdog_error: BaseException | None = None
     emergency_actions: list[ActionModel] = []
     emergency_state: IncidentState | None = None
     emergency_reason: str | None = None
@@ -589,8 +802,18 @@ async def run_scenario(
             max_staleness_ms=float(get(cfg, "watchdog.max_staleness_ms")),
             max_frozen_ticks=int(get(cfg, "watchdog.max_frozen_ticks")),
             actuate=actuate,
+            fallback=(
+                _watchdog_fallback(protocol, cfg)
+                if bool(cfg.get("watchdog", {}).get("fallback_enabled", True))
+                else None
+            ),
         )
         watchdog_task = asyncio.create_task(watchdog.run(watchdog_stop))
+
+    def watchdog_abort() -> str | None:
+        if watchdog is not None and watchdog.trip is not None:
+            return f"watchdog {watchdog.trip.reason.value} took precedence"
+        return None
 
     with VideoSource(clip) as source:
         first = source.read(0)
@@ -615,7 +838,12 @@ async def run_scenario(
 
                 if worker is not None:
                     for sam_sample in worker.poll():
-                        sampler.reanchor(sam_sample.mask_full, sam_sample.t_s)
+                        try:
+                            sampler.reanchor(sam_sample.mask_full, sam_sample.t_s)
+                        except Exception as exc:
+                            # A malformed SAM mask must cost refinement, not the tick.
+                            logger.warning("SAM reanchor dropped: %r", exc)
+                            continue
                     if sampler.last_warped is None:
                         raise PipelineError("tracker did not produce a rectified frame")
                     worker.submit(sampler.last_warped, frame.index, frame.t_s)
@@ -665,7 +893,7 @@ async def run_scenario(
                 )
                 phi_t = thermal_phi(sample.dew_margin_c, cfg["fusion"]["thermal"])
 
-                if phi_h >= float(get(cfg, "decision.hydraulic_confirm_phi")):
+                if phi_h >= hydraulic_confirm_phi:
                     hydraulic_since = frame.t_s if hydraulic_since is None else hydraulic_since
                     hydraulic_low_ms = int(round((frame.t_s - hydraulic_since) * 1000.0))
                 else:
@@ -747,6 +975,11 @@ async def run_scenario(
                 # Hand the loop to the watchdog task. It is not fed by this loop:
                 # it reads the GPU itself and can trip while perception is stalled.
                 await asyncio.sleep(0)
+                if watchdog is not None and watchdog.actuation_failed:
+                    # The trip was initiated but its actuation could not be
+                    # confirmed. Stop the loop: the failure is filed FAILED_SAFE
+                    # after the watchdog task is awaited below, never dropped.
+                    break
                 if watchdog is not None and watchdog.actuated:
                     assert watchdog.trip is not None
                     return await _finish(
@@ -774,14 +1007,65 @@ async def run_scenario(
                         rate_changes=policy.changes,
                         protocol_mode=protocol,
                         bus=bus,
+                        source_estimate=_source_for(chosen, evidence.phi_h),
                     )
 
                 if decision.label in INCIDENT_LABELS:
                     sequence_started = time.perf_counter()
                     actions, sequence_state = await _actions_for(
-                        decision, frame.t_s, cfg, checkpoint_dir, protocol, emit_step
+                        decision,
+                        frame.t_s,
+                        cfg,
+                        checkpoint_dir,
+                        protocol,
+                        emit_step,
+                        watchdog_abort,
                     )
                     sequence_ms = (time.perf_counter() - sequence_started) * 1000.0
+
+                    # A trip whose actuation failed cannot be filed by the
+                    # normal path. Leave the loop so the watchdog failure is
+                    # filed FAILED_SAFE and re-raised, never swallowed by a
+                    # return from inside the loop.
+                    if watchdog is not None and watchdog.actuation_failed:
+                        break
+
+                    # The watchdog can trip while a confirmed-leak sequence is
+                    # already in flight. Its emergency action is the safety
+                    # result of the incident: never file the normal path as a
+                    # clean resolution after that trip.
+                    if watchdog is not None and watchdog.actuated:
+                        assert watchdog.trip is not None
+                        return await _finish(
+                            name=name,
+                            scenario=scenario,
+                            cfg=cfg,
+                            decision=decision,
+                            label=SystemLabel.EMERGENCY_TRIP,
+                            evidence=evidence,
+                            sample=sample,
+                            candidate=chosen,
+                            actions=emergency_actions,
+                            sequence_state=emergency_state,
+                            trip_reason=emergency_reason,
+                            junction_c=_junction_of(watchdog),
+                            timing=TimingSamples(
+                                tuple(perception_ms), tuple(fusion_ms), emergency_ms
+                            ),
+                            allow_llm=allow_llm,
+                            sam_mode=mode,
+                            sam_stats=worker.stats if worker is not None else None,
+                            ticks=ticks,
+                            frame_range=(0, frame.index),
+                            frames=frame.index + 1,
+                            out_dir=out_dir,
+                            tick_rate_hz=policy.hz,
+                            rate_changes=policy.changes,
+                            protocol_mode=protocol,
+                            bus=bus,
+                            source_estimate=_source_for(chosen, evidence.phi_h),
+                        )
+
                     return await _finish(
                         name=name,
                         scenario=scenario,
@@ -807,6 +1091,7 @@ async def run_scenario(
                         rate_changes=policy.changes,
                         protocol_mode=protocol,
                         bus=bus,
+                        source_estimate=_source_for(chosen, evidence.phi_h),
                     )
         finally:
             watchdog_stop.set()
@@ -815,6 +1100,14 @@ async def run_scenario(
                     await asyncio.wait_for(watchdog_task, timeout=5.0)
                 except TimeoutError:
                     watchdog_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await watchdog_task
+                except BaseException as exc:
+                    # Retrieve the task failure instead of swallowing it. A
+                    # WatchdogActuationError means the trip was initiated but
+                    # never confirmed; it is filed FAILED_SAFE below and then
+                    # re-raised so the process exits non-zero.
+                    watchdog_error = exc
             if worker is not None:
                 await worker.close()
 
@@ -853,7 +1146,51 @@ async def run_scenario(
             rate_changes=policy.changes,
             protocol_mode=protocol,
             bus=bus,
+            source_estimate=_source_for(last_candidate, last_evidence.phi_h),
         )
+
+    # The watchdog task failed: the trip was initiated but its actuation could
+    # not be confirmed, so the node may still be running. File the incident as
+    # FAILED_SAFE with the primary failure and the fallback verification
+    # outcome, then re-raise so the process exits non-zero instead of reporting
+    # a clean run after an unconfirmed emergency action.
+    if watchdog_error is not None:
+        if (
+            isinstance(watchdog_error, WatchdogActuationError)
+            and watchdog is not None
+            and last_evidence is not None
+            and last_sample is not None
+            and last_decision is not None
+        ):
+            assert watchdog.trip is not None
+            await _finish(
+                name=name,
+                scenario=scenario,
+                cfg=cfg,
+                decision=last_decision,
+                label=SystemLabel.EMERGENCY_TRIP,
+                evidence=last_evidence,
+                sample=last_sample,
+                candidate=last_candidate,
+                actions=_failed_trip_actions(watchdog, last_t_s, emergency_actions),
+                sequence_state=IncidentState.FAILED_SAFE,
+                trip_reason=watchdog.trip.reason.value,
+                junction_c=_junction_of(watchdog),
+                timing=TimingSamples(tuple(perception_ms), tuple(fusion_ms), emergency_ms),
+                allow_llm=allow_llm,
+                sam_mode=mode,
+                sam_stats=worker.stats if worker is not None else None,
+                ticks=ticks,
+                frame_range=(0, last_index),
+                frames=last_index + 1,
+                out_dir=out_dir,
+                tick_rate_hz=policy.hz,
+                rate_changes=policy.changes,
+                protocol_mode=protocol,
+                bus=bus,
+                source_estimate=_source_for(last_candidate, last_evidence.phi_h),
+            )
+        raise watchdog_error
 
     if bus is not None:
         bus.publish(
@@ -880,6 +1217,9 @@ async def run_scenario(
         protocol_mode=protocol,
         sequence_state=None,
         timing=TimingSamples(tuple(perception_ms), tuple(fusion_ms), sequence_ms),
+        source_estimate=_source_for(
+            last_candidate, last_evidence.phi_h if last_evidence is not None else 0.0
+        ),
     )
 
 
@@ -960,6 +1300,7 @@ async def _finish(
     rate_changes: int,
     protocol_mode: str,
     bus: EventBus | None = None,
+    source_estimate: SourceEstimate | None = None,
 ) -> RunResult:
     fixture_source = scenario.get("provenance", "synthetic")
     if fixture_source not in ("synthetic", "capture"):
@@ -1052,4 +1393,5 @@ async def _finish(
             if candidate is not None
             else None
         ),
+        source_estimate=source_estimate,
     )

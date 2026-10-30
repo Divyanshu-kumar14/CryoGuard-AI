@@ -57,6 +57,17 @@ class LaggingSensor:
         return WatchdogReading(junction_c=42.0, timestamp_s=time.monotonic() - self.lag_s)
 
 
+def _sustained_kwargs(cfg: dict) -> dict:
+    section = cfg.get("watchdog", {})
+    return {
+        "sustained_min_util_pct": float(section.get("sustained_load_min_util_pct", 10.0)),
+        "sustained_min_power_w": float(section.get("sustained_load_min_power_w", 70.0)),
+        "sustained_ticks": int(section.get("sustained_load_ticks", 5)),
+        "sustained_release_util_pct": float(section.get("sustained_load_release_util_pct", 5.0)),
+        "sustained_release_power_w": float(section.get("sustained_load_release_power_w", 50.0)),
+    }
+
+
 async def _run(cfg: dict, make_sensor, *, period_s: float = 0.0):
     seen: list[tuple[WatchdogTrip, str]] = []
 
@@ -71,6 +82,7 @@ async def _run(cfg: dict, make_sensor, *, period_s: float = 0.0):
         period_s=period_s,
         max_staleness_ms=float(cfg["watchdog"]["max_staleness_ms"]),
         max_frozen_ticks=int(cfg["watchdog"]["max_frozen_ticks"]),
+        **_sustained_kwargs(cfg),
         actuate=actuate,
     )
     trip = await asyncio.wait_for(dog.run(stop), timeout=2.0)
@@ -80,6 +92,11 @@ async def _run(cfg: dict, make_sensor, *, period_s: float = 0.0):
 def test_the_config_carries_the_staleness_budget(cfg) -> None:
     assert cfg["watchdog"]["max_staleness_ms"] == 500
     assert cfg["watchdog"]["max_frozen_ticks"] == 15
+    assert cfg["watchdog"]["sustained_load_min_util_pct"] == 10.0
+    assert cfg["watchdog"]["sustained_load_min_power_w"] == 70.0
+    assert cfg["watchdog"]["sustained_load_ticks"] == 5
+    assert cfg["watchdog"]["sustained_load_release_util_pct"] == 5.0
+    assert cfg["watchdog"]["sustained_load_release_power_w"] == 50.0
 
 
 def test_a_sample_older_than_500_ms_trips_stale(cfg) -> None:
@@ -95,8 +112,11 @@ def test_a_sample_older_than_500_ms_trips_stale(cfg) -> None:
 
 
 def test_a_value_frozen_for_sixteen_ticks_under_load_trips_frozen(cfg) -> None:
+    """Genuine freeze: temp AND corroborating channels stuck under sustained load."""
+
+    frozen = WatchdogReading(42.0, utilization_pct=80.0, power_w=250.0)
     dog, trip, seen, sensor = asyncio.run(
-        _run(cfg, lambda stop: ScriptedSensor([WatchdogReading(42.0)], stop, reads=40))
+        _run(cfg, lambda stop: ScriptedSensor([frozen], stop, reads=40))
     )
 
     assert trip is not None
@@ -105,6 +125,41 @@ def test_a_value_frozen_for_sixteen_ticks_under_load_trips_frozen(cfg) -> None:
     assert dog.frozen_ticks == 16
     assert sensor.reads == 16  # trips on the first sample past the budget
     assert seen == [(WatchdogTrip.SENSOR_FROZEN, trip.detail)]
+
+
+def test_a_constant_temp_with_varying_power_does_not_trip(cfg) -> None:
+    """Integer quantization plus a thermal plateau is not a stuck register."""
+
+    readings = [
+        WatchdogReading(42.0, utilization_pct=80.0, power_w=240.0 + float(index))
+        for index in range(40)
+    ]
+    dog, trip, seen, sensor = asyncio.run(
+        _run(cfg, lambda stop: ScriptedSensor(readings, stop, reads=40))
+    )
+
+    assert trip is None
+    assert seen == []
+    assert dog.checks == 40
+    assert sensor.reads == 40
+
+
+def test_a_single_channel_freeze_without_corroboration_degrades_without_tripping(
+    cfg,
+) -> None:
+    """Temp-only repeat under load is suspect but unproven: no emergency."""
+
+    dog, trip, seen, sensor = asyncio.run(
+        _run(cfg, lambda stop: ScriptedSensor([WatchdogReading(42.0)], stop, reads=40))
+    )
+
+    assert trip is None
+    assert seen == []
+    assert dog.checks == 40
+    assert sensor.reads == 40
+    assert dog.degraded_ticks == dog.checks - int(cfg["watchdog"]["sustained_load_ticks"]) + 1
+    assert dog.last_degraded is not None
+    assert dog.last_degraded.reason is WatchdogTrip.SENSOR_HEALTH_DEGRADED
 
 
 def test_a_replayed_sample_sequence_is_stale(cfg) -> None:

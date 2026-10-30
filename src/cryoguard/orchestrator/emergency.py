@@ -6,7 +6,8 @@ because the trigger is a hardware condition rather than a measured leak with a
 usable checkpoint. It never claims an isolation it did not verify.
 
 Order: valve close (spring-return), scheduler cordon (reversible), power cut.
-A valve ``FAULT`` or a ``VALVE_SEAL_LEAK`` (stem closed, line still pressurized)
+A valve ``FAULT``, a ``SENSOR_DISAGREEMENT`` (witnesses contradict or a witness
+is unavailable), or a ``VALVE_SEAL_LEAK`` (stem closed, line still pressurized)
 still cuts power and ends ``HARD_TRIP``; if the cut also fails the result is
 ``FAILED_SAFE``, never an optimistic ``EMERGENCY_TRIP``.
 """
@@ -17,7 +18,13 @@ from dataclasses import dataclass
 
 from cryoguard.models import IncidentState, ValveStatus
 from cryoguard.orchestrator.actions import ActionLog, Clock, SequenceStep, StepCallback
-from cryoguard.orchestrator.incident_fsm import BmcPort, PlcPort, PowerResult, SchedulerPort
+from cryoguard.orchestrator.incident_fsm import (
+    BmcPort,
+    PlcPort,
+    PowerResult,
+    SchedulerPort,
+    power_verified,
+)
 
 
 @dataclass(frozen=True)
@@ -73,13 +80,27 @@ class EmergencySequence:
                 valve_status = "FAULT"
             elif valve.status is ValveStatus.VALVE_SEAL_LEAK:
                 valve_status = "VALVE_SEAL_LEAK"
+            elif valve.status is ValveStatus.SENSOR_DISAGREEMENT:
+                valve_status = "SENSOR_DISAGREEMENT"
             else:
                 valve_status = "LIMIT_SWITCH_CLOSED"
+            if valve.status in (ValveStatus.VERIFIED, ValveStatus.VERIFIED_SLOW):
+                fallback = f"limit switch; band {valve.status.value}"
+                valve_detail = (
+                    "Close accepted; Stem closed; Line depressurized; "
+                    f"Isolation verified; {valve.detail or fallback}"
+                )
+            else:
+                fallback = f"limit switch; band {valve.status.value}"
+                valve_detail = (
+                    "Verification failed; Stem closed; Line depressurized: unproven; "
+                    f"{valve.detail or fallback}"
+                )
             self._record(
                 "PLC",
                 "VALVE_CLOSE",
                 valve_status,
-                valve.detail or f"limit switch; band {valve.status.value}",
+                valve_detail,
             )
             if valve.status in (ValveStatus.VERIFIED, ValveStatus.VERIFIED_SLOW):
                 # Scenario time, not measured wall time: the incident stays reproducible.
@@ -88,7 +109,7 @@ class EmergencySequence:
             self._cordon()
             power = self._power_cut(reason)
 
-            if not power.ok:
+            if not power_verified(power):
                 return EmergencyResult(IncidentState.FAILED_SAFE, self.log.snapshot())
             if valve.status not in (ValveStatus.VERIFIED, ValveStatus.VERIFIED_SLOW):
                 return EmergencyResult(IncidentState.HARD_TRIP, self.log.snapshot())

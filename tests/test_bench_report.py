@@ -121,10 +121,10 @@ def test_the_report_is_framed_as_a_scenario_verification_suite() -> None:
     rendered = render_markdown(data)
 
     assert data["title"] == (
-        "Deterministic Regression & Safety Verification Suite (4 Physical Scenarios)"
+        "Deterministic Regression & Safety Verification Suite (4 Synthetic Scenarios)"
     )
     assert rendered.startswith(
-        "# Deterministic Regression & Safety Verification Suite (4 Physical Scenarios)"
+        "# Deterministic Regression & Safety Verification Suite (4 Synthetic Scenarios)"
     )
     assert data["verification"]["display"] == (
         "Automated Scenario Verification: 2/2 passing "

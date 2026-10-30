@@ -3,6 +3,14 @@
 clip: "fixtures/videos/simulated/sim_leak_qd4.mp4"
 provenance: "synthetic"
 t0_offset_s: 0.0
+# Independent ground truth for the leak SOURCE (static origin at t=0), taken
+# from the fixture generator (scripts/make_sim_fixtures.py: origin_mm). It
+# coincides numerically with the QD-04 ROI centre by fixture construction, but
+# it is declared here — not derived from the detector's topology — so the
+# source-error metric cannot conflate the instrument with the truth. The
+# observed spill centroid drifts 11 mm/s from this point and is reported
+# separately, never as the origin.
+leak_source_mm: [195.0, 145.0]
 expected:
   label: "CONFIRMED_LEAK"
   zone: 2

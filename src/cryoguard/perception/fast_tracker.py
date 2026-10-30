@@ -59,10 +59,54 @@ class Track:
     misses: int = 0
     sam_t_s: float | None = None
     _area_history: list[tuple[float, float]] = field(default_factory=list, repr=False)
+    # Kinematic log of classical-tick centroids: (t_s, (x_mm, y_mm)).
+    # Re-anchor refreshes geometry without appending (its t_s is the older
+    # submission time, not a new observation), so this stays monotonic and
+    # deterministic. The leak-source estimator consumes it to assess drift;
+    # the centroid itself is the observed spill position, never the source.
+    _centroid_history: list[tuple[float, tuple[float, float]]] = field(
+        default_factory=list, repr=False
+    )
 
     @property
     def age_ticks(self) -> int:
         return self.hits + self.misses
+
+    @property
+    def bbox_centre_mm(self) -> tuple[float, float]:
+        """Centre of the bounding box, distinct from the mask centroid.
+
+        The centroid is the intensity-connected-component centre (it slides
+        downstream as the spill spreads); the bbox centre is pure geometry.
+        Neither is the leak source — both are observed spill quantities the
+        source estimator takes as input.
+        """
+
+        x0, y0, x1, y1 = self.bbox_mm
+        return ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+
+    @property
+    def velocity_mm_per_s(self) -> tuple[float, float]:
+        """Least-squares drift velocity over the centroid history.
+
+        Returns (0, 0) with fewer than two samples or a degenerate clock.
+        Deterministic: closed-form least squares over time-ordered history.
+        """
+
+        if len(self._centroid_history) < 2:
+            return (0.0, 0.0)
+        times = np.array([t for t, _ in self._centroid_history], dtype=np.float64)
+        xs = np.array([c[0] for _, c in self._centroid_history], dtype=np.float64)
+        ys = np.array([c[1] for _, c in self._centroid_history], dtype=np.float64)
+        times = times - times[0]
+        if times[-1] <= 0.0 or not np.all(np.isfinite(times)):
+            return (0.0, 0.0)
+        design = np.vstack([times, np.ones_like(times)]).T
+        vx, _ = np.linalg.lstsq(design, xs, rcond=None)[0]
+        vy, _ = np.linalg.lstsq(design, ys, rcond=None)[0]
+        if not (np.isfinite(vx) and np.isfinite(vy)):
+            return (0.0, 0.0)
+        return (float(vx), float(vy))
 
     def __str__(self) -> str:  # pragma: no cover - debugging aid
         x, y = self.centroid_mm
@@ -172,11 +216,34 @@ class FastTracker:
         matched track keeps its identity and its area history; the SAM mask only
         refreshes geometry, which is what makes it an *anchor* rather than a
         second, slower tracker.
+
+        The anchor refresh intentionally does not append to the centroid
+        history: its t_s is the (older) submission time, not a new classical
+        observation, and appending it would break the monotonic kinematic log
+        the source estimator relies on.
+
+        Staleness is enforced one layer up: the SAM worker drops late results
+        from older frames before they reach here, so an old mask can never
+        overwrite newer tracker state.
+
+        Score separation: only the mask *geometry* is consumed. The SAM
+        segmentation confidence (``SamSample.score``) is display-only — it is
+        never written onto a track and never enters fusion P, which is a
+        function of classical evidence (phi_v, phi_h, phi_t, W) alone.
         """
 
         if px_per_mm <= 0:
             raise TrackerError(f"px_per_mm must be positive: {px_per_mm}")
-        binary = np.where(mask.astype(bool), 255, 0).astype(np.uint8)
+        if not isinstance(mask, np.ndarray) or mask.ndim != 2:
+            raise TrackerError(
+                f"reanchor needs a 2-D full-canvas mask, got {type(mask).__name__} "
+                f"with ndim={getattr(mask, 'ndim', '?')}"
+            )
+        if mask.shape != warped_bgr.shape[:2]:
+            raise TrackerError(
+                f"reanchor mask shape {mask.shape} does not match frame {warped_bgr.shape[:2]}"
+            )
+        binary = np.where(np.ascontiguousarray(mask).astype(bool), 255, 0).astype(np.uint8)
         detections = self._detections(binary, warped_bgr, px_per_mm)
 
         radius = float(self.cfg.get("reanchor_radius_mm", self.cfg["link_radius_mm"]))
@@ -312,6 +379,7 @@ class FastTracker:
             first_t=t_s,
             last_t=t_s,
             _area_history=[(t_s, det.area_mm2)],
+            _centroid_history=[(t_s, det.centroid_mm)],
         )
         self._next_id += 1
         return track
@@ -321,6 +389,7 @@ class FastTracker:
         track.last_t = t_s
         track.hits += 1
         track.misses = 0
+        track._centroid_history.append((t_s, det.centroid_mm))
 
         window = int(self.cfg["growth_window"])
         track._area_history.append((t_s, det.area_mm2))

@@ -466,3 +466,349 @@ def test_a_broken_client_constructor_returns_the_fallback(cfg, monkeypatch) -> N
 
     assert result is original
     assert result.report_source == "deterministic_fallback"
+
+
+# --- Structured-output reliability: honest metadata + compact retry ---
+
+
+def reply_with_finish(
+    content: str = GOOD,
+    *,
+    finish_reason: str | None = "stop",
+    prompt_tokens: int = 210,
+    completion_tokens: int = 48,
+):
+    choice = SimpleNamespace(
+        message=SimpleNamespace(content=content),
+        **({"finish_reason": finish_reason} if finish_reason is not None else {}),
+    )
+    return SimpleNamespace(
+        choices=[choice],
+        usage=SimpleNamespace(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens),
+    )
+
+
+def run_explain(cfg, prompts, fake, proof) -> object:
+    client = MuseClient(cfg["report"], client=fake, prompts=prompts, proof_log=proof)
+    return asyncio.run(
+        client.explain(
+            incident_id="INC-RACK-08B-20261030-01",
+            label="CONFIRMED_LEAK",
+            evidence=evidence(),
+            actions=actions(),
+            fixture_source="synthetic",
+        )
+    )
+
+
+def test_ok_result_carries_honest_metadata(cfg, prompts, tmp_path) -> None:
+    from cryoguard.report.muse_client import health_summary
+
+    fake, _ = fake_client(reply_with_finish(GOOD, finish_reason="stop"))
+    proof = tmp_path / "p.jsonl"
+    result = run_explain(cfg, prompts, fake, proof)
+
+    assert result.finish_reason == "stop"
+    assert result.response_chars == len(GOOD)
+    assert result.provider == "baseten"
+    assert result.model == cfg["report"]["model"]
+    line = json.loads(proof.read_text(encoding="utf-8").strip())
+    assert line["status"] == "ok"
+    assert line["finishReason"] == "stop"
+    assert line["responseChars"] == len(GOOD)
+    assert line["schemaValid"] is True
+    assert line["provider"] == "baseten"
+    assert line["model"] == cfg["report"]["model"]
+    assert "failureCategory" not in line
+    assert "detail" not in line
+    summary = health_summary(proof_log=proof)
+    assert summary["requests"] == 1
+    assert summary["attempts"] == 1
+    assert summary["valid_rate"] == 1.0
+
+
+def test_repair_is_compact_with_no_assistant_echo(cfg, prompts, tmp_path) -> None:
+    fake, completions = fake_client(reply_with_finish("not json"), reply_with_finish())
+    proof = tmp_path / "p.jsonl"
+    run_explain(cfg, prompts, fake, proof)
+
+    assert len(completions.calls) == 2
+    repair_messages = completions.calls[1]["messages"]
+    # Original 2 messages plus one compact user repair (no assistant echo).
+    assert len(repair_messages) == 3
+    assert [m["role"] for m in repair_messages] == ["system", "user", "user"]
+    assert "failed schema validation" in repair_messages[2]["content"]
+    assert "Reply JSON only" in repair_messages[2]["content"]
+    assert "not json" not in repair_messages[2]["content"]
+    lines = [json.loads(line) for line in proof.read_text(encoding="utf-8").splitlines()]
+    assert lines[0]["status"] == "malformed"
+    assert lines[0]["failureCategory"] == "invalid_json"
+    assert lines[0]["schemaValid"] is False
+    assert lines[0]["finishReason"] == "stop"
+    assert lines[0]["responseChars"] == len("not json")
+
+
+def test_empty_response_is_categorised(cfg, prompts, tmp_path) -> None:
+    fake, _ = fake_client(reply_with_finish(""), reply_with_finish("   "))
+    proof = tmp_path / "p.jsonl"
+    client = MuseClient(cfg["report"], client=fake, prompts=prompts, proof_log=proof)
+    with pytest.raises(MuseUnavailable, match="malformed JSON twice"):
+        asyncio.run(
+            client.explain(
+                incident_id="INC-RACK-08B-20261030-01",
+                label="CONFIRMED_LEAK",
+                evidence=evidence(),
+                actions=actions(),
+                fixture_source="synthetic",
+            )
+        )
+    lines = [json.loads(line) for line in proof.read_text(encoding="utf-8").splitlines()]
+    assert [line["failureCategory"] for line in lines] == ["empty", "empty"]
+
+
+def test_truncated_length_is_detected_and_logged(cfg, prompts, tmp_path) -> None:
+    fake, completions = fake_client(
+        reply_with_finish("", finish_reason="length"),
+        reply_with_finish(GOOD, finish_reason="stop"),
+    )
+    proof = tmp_path / "p.jsonl"
+    result = run_explain(cfg, prompts, fake, proof)
+
+    assert result.attempts == 2
+    assert result.finish_reason == "stop"
+    lines = [json.loads(line) for line in proof.read_text(encoding="utf-8").splitlines()]
+    assert lines[0]["failureCategory"] == "truncated_length"
+    assert lines[0]["finishReason"] == "length"
+    assert lines[1]["status"] == "ok"
+    # Compact retry even for truncation: no assistant echo.
+    assert len(completions.calls[1]["messages"]) == 3
+
+
+def test_truncated_valid_json_still_retries(cfg, prompts, tmp_path) -> None:
+    fake, _ = fake_client(
+        reply_with_finish(GOOD, finish_reason="length"),
+        reply_with_finish(GOOD, finish_reason="length"),
+    )
+    proof = tmp_path / "p.jsonl"
+    client = MuseClient(cfg["report"], client=fake, prompts=prompts, proof_log=proof)
+    with pytest.raises(MuseUnavailable, match="malformed JSON twice"):
+        asyncio.run(
+            client.explain(
+                incident_id="INC-RACK-08B-20261030-01",
+                label="CONFIRMED_LEAK",
+                evidence=evidence(),
+                actions=actions(),
+                fixture_source="synthetic",
+            )
+        )
+    lines = [json.loads(line) for line in proof.read_text(encoding="utf-8").splitlines()]
+    assert all(line["failureCategory"] == "truncated_length" for line in lines)
+
+
+def test_extra_keys_missing_fields_and_empty_strings(cfg, prompts, tmp_path) -> None:
+    cases = [
+        (
+            json.dumps({"root_cause": "a", "uncertainty": "b", "extra": "c"}),
+            "extra_fields",
+        ),
+        (json.dumps({"root_cause": "only one"}), "missing_fields"),
+        (json.dumps({"root_cause": "", "uncertainty": "b"}), "empty_strings"),
+        (json.dumps({"root_cause": "   ", "uncertainty": "b"}), "empty_strings"),
+    ]
+    for payload, category in cases:
+        fake, _ = fake_client(reply_with_finish(payload), reply_with_finish(payload))
+        proof = tmp_path / f"{category}.jsonl"
+        client = MuseClient(cfg["report"], client=fake, prompts=prompts, proof_log=proof)
+        with pytest.raises(MuseUnavailable, match="malformed JSON twice"):
+            asyncio.run(
+                client.explain(
+                    incident_id="INC-RACK-08B-20261030-01",
+                    label="CONFIRMED_LEAK",
+                    evidence=evidence(),
+                    actions=actions(),
+                    fixture_source="synthetic",
+                )
+            )
+        lines = [json.loads(line) for line in proof.read_text(encoding="utf-8").splitlines()]
+        assert lines[0]["failureCategory"] == category, payload
+
+
+def test_too_long_and_unsupported_assertion(cfg, prompts, tmp_path) -> None:
+    long_payload = json.dumps({"root_cause": "x" * 2001, "uncertainty": "ok"})
+    fake, _ = fake_client(reply_with_finish(long_payload), reply_with_finish(long_payload))
+    proof = tmp_path / "long.jsonl"
+    client = MuseClient(cfg["report"], client=fake, prompts=prompts, proof_log=proof)
+    with pytest.raises(MuseUnavailable, match="malformed JSON twice"):
+        asyncio.run(
+            client.explain(
+                incident_id="INC-RACK-08B-20261030-01",
+                label="CONFIRMED_LEAK",
+                evidence=evidence(),
+                actions=actions(),
+                fixture_source="synthetic",
+            )
+        )
+    assert json.loads(proof.read_text().splitlines()[0])["failureCategory"] == "too_long"
+
+    bad = json.dumps({"root_cause": "Please open the valve now.", "uncertainty": "ok"})
+    fake2, _ = fake_client(reply_with_finish(bad), reply_with_finish(bad))
+    proof2 = tmp_path / "blocked.jsonl"
+    client2 = MuseClient(cfg["report"], client=fake2, prompts=prompts, proof_log=proof2)
+    with pytest.raises(MuseUnavailable, match="malformed JSON twice"):
+        asyncio.run(
+            client2.explain(
+                incident_id="INC-RACK-08B-20261030-01",
+                label="CONFIRMED_LEAK",
+                evidence=evidence(),
+                actions=actions(),
+                fixture_source="synthetic",
+            )
+        )
+    assert (
+        json.loads(proof2.read_text().splitlines()[0])["failureCategory"] == "unsupported_assertion"
+    )
+
+
+def test_timeout_and_http_error_categories(cfg, prompts, tmp_path) -> None:
+    async def hang():
+        await asyncio.sleep(5.0)
+        return reply_with_finish()
+
+    fake, _ = fake_client(hang())
+    section = dict(cfg["report"], timeout_ms=50)
+    proof = tmp_path / "t.jsonl"
+    client = MuseClient(section, client=fake, prompts=prompts, proof_log=proof)
+    with pytest.raises(MuseUnavailable, match="timed out"):
+        asyncio.run(
+            client.explain(
+                incident_id="INC-RACK-08B-20261030-01",
+                label="CONFIRMED_LEAK",
+                evidence=evidence(),
+                actions=actions(),
+                fixture_source="synthetic",
+            )
+        )
+    line = json.loads(proof.read_text().strip())
+    assert line["status"] == "timeout"
+    assert line["failureCategory"] == "timeout"
+
+    fake2, _ = fake_client(RuntimeError("HTTP 500"))
+    proof2 = tmp_path / "e.jsonl"
+    client2 = MuseClient(cfg["report"], client=fake2, prompts=prompts, proof_log=proof2)
+    with pytest.raises(MuseUnavailable, match="HTTP 500"):
+        asyncio.run(
+            client2.explain(
+                incident_id="INC-RACK-08B-20261030-01",
+                label="CONFIRMED_LEAK",
+                evidence=evidence(),
+                actions=actions(),
+                fixture_source="synthetic",
+            )
+        )
+    line2 = json.loads(proof2.read_text().strip())
+    assert line2["status"] == "error"
+    assert line2["failureCategory"] == "http_error"
+
+
+def test_exhausted_retries_keep_two_malformed_lines(cfg, prompts, tmp_path) -> None:
+    fake, completions = fake_client(reply_with_finish("{}"), reply_with_finish("{}"))
+    proof = tmp_path / "p.jsonl"
+    client = MuseClient(cfg["report"], client=fake, prompts=prompts, proof_log=proof)
+    with pytest.raises(MuseUnavailable, match="malformed JSON twice"):
+        asyncio.run(
+            client.explain(
+                incident_id="INC-RACK-08B-20261030-01",
+                label="CONFIRMED_LEAK",
+                evidence=evidence(),
+                actions=actions(),
+                fixture_source="synthetic",
+            )
+        )
+    assert len(completions.calls) == 2
+    lines = [json.loads(line) for line in proof.read_text(encoding="utf-8").splitlines()]
+    assert [line["status"] for line in lines] == ["malformed", "malformed"]
+    assert lines[0]["failureCategory"] == "missing_fields"
+
+
+def test_health_summary_separates_attempts_from_requests(tmp_path) -> None:
+    from cryoguard.report.muse_client import health_summary
+
+    entries = [
+        {
+            "incidentId": "A",
+            "status": "malformed",
+            "latencyMs": 100.0,
+            "promptTokens": 10,
+            "completionTokens": 5,
+            "failureCategory": "invalid_json",
+        },
+        {
+            "incidentId": "A",
+            "status": "ok",
+            "latencyMs": 200.0,
+            "promptTokens": 10,
+            "completionTokens": 6,
+            "finishReason": "stop",
+        },
+        {
+            "incidentId": "B",
+            "status": "malformed",
+            "latencyMs": 300.0,
+            "promptTokens": 20,
+            "completionTokens": 600,
+            "failureCategory": "truncated_length",
+            "finishReason": "length",
+        },
+        {
+            "incidentId": "B",
+            "status": "malformed",
+            "latencyMs": 400.0,
+            "promptTokens": 20,
+            "completionTokens": 600,
+            "failureCategory": "truncated_length",
+            "finishReason": "length",
+        },
+    ]
+    summary = health_summary(entries)
+    # Two requests (A, B), four attempts: retries are not new incidents.
+    assert summary["requests"] == 2
+    assert summary["attempts"] == 4
+    assert summary["ok_requests"] == 1
+    assert summary["failed_requests"] == 1
+    assert summary["valid_rate"] == 0.5
+    assert summary["malformed_rate"] == pytest.approx(0.75)
+    assert summary["retry_rate"] == 1.0
+    assert summary["median_latency_ms"] == pytest.approx(300.0)
+    assert summary["p95_latency_ms"] is not None
+    # Terminal attempts only: A-ok (10/6) and B-second (20/600).
+    assert summary["avg_prompt_tokens"] == pytest.approx(15.0)
+    assert summary["avg_completion_tokens"] == pytest.approx(303.0)
+    assert summary["truncated_count"] == 2
+
+    path = tmp_path / "proof.jsonl"
+    path.write_text("\n".join(json.dumps(e) for e in entries) + "\n", encoding="utf-8")
+    from_file = health_summary(proof_log=path)
+    assert from_file["requests"] == 2
+    assert health_summary(path)["attempts"] == 4
+
+
+def test_proof_log_never_contains_secrets_or_full_responses(cfg, prompts, tmp_path) -> None:
+    secret_body = json.dumps(
+        {"root_cause": "a", "uncertainty": "b", "secret": "sk-secret-should-not-log"}
+    )
+    fake, _ = fake_client(reply_with_finish(secret_body), reply_with_finish(secret_body))
+    proof = tmp_path / "p.jsonl"
+    client = MuseClient(cfg["report"], client=fake, prompts=prompts, proof_log=proof)
+    with pytest.raises(MuseUnavailable):
+        asyncio.run(
+            client.explain(
+                incident_id="INC-RACK-08B-20261030-01",
+                label="CONFIRMED_LEAK",
+                evidence=evidence(),
+                actions=actions(),
+                fixture_source="synthetic",
+            )
+        )
+    text = proof.read_text(encoding="utf-8")
+    assert "sk-secret" not in text
+    assert "MUSE_API_KEY" not in text and "BASETEN_API_KEY" not in text

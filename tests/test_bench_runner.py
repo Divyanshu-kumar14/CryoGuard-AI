@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from cryoguard.bench.faults import run_fault_matrix
 from cryoguard.bench.report import build_payload
 from cryoguard.bench.runner import (
     FITTING_RADIUS_MM,
@@ -171,8 +172,11 @@ def test_the_committed_benchmark_reproduces(cfg, topology) -> None:
         fusion_hash=str(freeze["fusion_hash"]),
         git_sha="test",
         confidence=float(cfg["bench"]["confidence"]),
+        fault_summary=run_fault_matrix(),
     )
 
     assert payload["runHash"] == committed["runHash"]
     assert payload["clips"] == committed["clips"]
     assert payload["metrics"] == committed["metrics"]
+    assert payload["faultInjection"] == committed["faultInjection"]
+    assert payload["sourceLocalization"] == committed["sourceLocalization"]

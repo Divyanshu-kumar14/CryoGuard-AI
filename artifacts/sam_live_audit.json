@@ -1,0 +1,51 @@
+{
+  "clip": "fixtures/videos/simulated/sim_leak_qd4.mp4",
+  "cropShape": [
+    200,
+    200,
+    3
+  ],
+  "mode": "live",
+  "model": "sam-3.1",
+  "note": "Live hosted requests. Zero mask counts are valid empty lanes, not errors, and are disclosed rather than replaced with a cache result.",
+  "tracerBBoxPx": {
+    "tracerPixels": 10359,
+    "x0": 382,
+    "x1": 851,
+    "y0": 282,
+    "y1": 365
+  },
+  "trials": [
+    {
+      "cacheKey": "94b1f18eddf832da07063dfe4665b6f06630a0b23650a9529c46aed165fc857e",
+      "cached": false,
+      "maskAreasPx": [],
+      "maskCount": 0,
+      "model": "sam-3.1",
+      "ok": true,
+      "prompt": "fluorescent yellow liquid droplet",
+      "provenance": "api"
+    },
+    {
+      "cacheKey": "dc84d6f80e5e1f67828b9cb08b3f8a6802aa14be0e43331c7baee4733d4928b6",
+      "cached": false,
+      "maskAreasPx": [],
+      "maskCount": 0,
+      "model": "sam-3.1",
+      "ok": true,
+      "prompt": "bright green blob",
+      "provenance": "api"
+    },
+    {
+      "cacheKey": "da5489b8d97a7a8f810fb480f4ac9783de69587ba914dbe8a8360ad9af2d3914",
+      "cached": false,
+      "maskAreasPx": [],
+      "maskCount": 0,
+      "model": "sam-3.1",
+      "ok": true,
+      "prompt": "yellow-green glow",
+      "provenance": "api"
+    }
+  ],
+  "ts": "2026-10-30T21:18:26Z"
+}

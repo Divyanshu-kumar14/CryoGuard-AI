@@ -13,6 +13,12 @@ Localization is geometric, not a string match: the candidate centroid in
 rectified chassis millimetres is compared with the centre of the configured QD
 ROI, and the Euclidean error must fall inside the fitting radius. A reported
 origin that merely names "QD-04" is not evidence that the leak was found there.
+
+The back-projected source hypothesis (``RunResult.source_estimate``) is
+reported separately against the independent manifest ``leak_source_mm``. When
+the pipeline produced no genuine estimate the source fields are unavailable,
+never zero, and fault-injection cases live in ``bench/faults.py`` with counts
+kept separate from the scenario metrics below.
 """
 
 from __future__ import annotations
@@ -76,6 +82,17 @@ class ClipRun:
     valve_verified: bool | None
     checkpoint_committed: bool | None
     sequence_state: str | None
+    # Back-projected SOURCE hypothesis vs the independent manifest ground
+    # truth (leak_source_mm). Reported only when the pipeline produced a
+    # genuine estimate: None means unavailable, never zero. The spill
+    # centroid above is the observation; these fields are the origin claim.
+    # Defaulted so older constructions keep working; _row always fills them.
+    source_available: bool = False
+    source_error_mm: float | None = None
+    source_within_tolerance: bool | None = None
+    source_method: str = ""
+    source_estimate_mm: tuple[float, float] | None = None
+    ground_truth_source_mm: tuple[float, float] | None = None
 
     def as_row(self) -> dict[str, Any]:
         return {
@@ -97,6 +114,28 @@ class ClipRun:
             ),
             "localizedWithinTolerance": self.localized_within_tolerance,
             "localizable": self.localizable,
+            "sourceAvailable": self.source_available,
+            "sourceErrorMm": (
+                None if self.source_error_mm is None else round(float(self.source_error_mm), 2)
+            ),
+            "sourceWithinTolerance": self.source_within_tolerance,
+            "sourceMethod": self.source_method,
+            "sourceEstimateMm": (
+                None
+                if self.source_estimate_mm is None
+                else [
+                    round(float(self.source_estimate_mm[0]), 1),
+                    round(float(self.source_estimate_mm[1]), 1),
+                ]
+            ),
+            "groundTruthSourceMm": (
+                None
+                if self.ground_truth_source_mm is None
+                else [
+                    round(float(self.ground_truth_source_mm[0]), 1),
+                    round(float(self.ground_truth_source_mm[1]), 1),
+                ]
+            ),
             "zone": self.zone,
             "expectedZone": self.expected_zone,
             "detectionS": self.detection_s,
@@ -190,6 +229,18 @@ def _row(clip: dict[str, Any], result: RunResult, topology: dict[str, Any]) -> C
     valve_actions = [action for action in actions if action.command == "VALVE_CLOSE"]
     checkpoint_actions = [action for action in actions if action.command == "CHECKPOINT_VERIFY"]
 
+    # The source hypothesis lives on RunResult.source_estimate, computed
+    # against the independent manifest ground truth inside the pipeline. No
+    # estimate (None) means unavailable: the fields stay None/empty, never 0.
+    estimate = result.source_estimate
+    source_available = estimate is not None
+    source_xy = (float(estimate.x_mm), float(estimate.y_mm)) if estimate is not None else None
+    source_truth = (
+        (float(estimate.ground_truth_mm[0]), float(estimate.ground_truth_mm[1]))
+        if estimate is not None and estimate.ground_truth_mm is not None
+        else None
+    )
+
     return ClipRun(
         clip_id=str(clip["id"]),
         scenario=str(clip["scenario"]),
@@ -213,6 +264,16 @@ def _row(clip: dict[str, Any], result: RunResult, topology: dict[str, Any]) -> C
         localized_within_tolerance=localized,
         localization_error_mm=error_mm,
         localizable=localizable,
+        source_available=source_available,
+        source_error_mm=(
+            float(estimate.error_mm)
+            if estimate is not None and estimate.error_mm is not None
+            else None
+        ),
+        source_within_tolerance=estimate.within_tolerance if estimate is not None else None,
+        source_method=estimate.method if estimate is not None else "",
+        source_estimate_mm=source_xy,
+        ground_truth_source_mm=source_truth,
         zone=zone,
         expected_zone=int(clip.get("expected_zone", -1)),
         detection_s=float(actions[0].t_s) if actions else None,

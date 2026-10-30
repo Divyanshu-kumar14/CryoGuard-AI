@@ -3,6 +3,9 @@
 clip: "fixtures/videos/simulated/sim_condensation.mp4"
 provenance: "synthetic"
 t0_offset_s: 0.0
+# No leak source exists in this control fixture: source error is unavailable,
+# never zero.
+leak_source_mm: null
 expected:
   label: "NOMINAL"          # must stay below 0.40 and trigger zero actuation
   zone: 1
