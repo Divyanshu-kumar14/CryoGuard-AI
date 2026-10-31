@@ -145,6 +145,7 @@ def _compactness(component: np.ndarray) -> float:
 class FastTracker:
     def __init__(self, perception_cfg: dict[str, Any]) -> None:
         self.cfg = perception_cfg
+        self.centroid_window = int(perception_cfg.get("centroid_window", 50))
         self._next_id = 1
         self._tracks: list[Track] = []
         self.last_mask: np.ndarray | None = None
@@ -390,6 +391,8 @@ class FastTracker:
         track.hits += 1
         track.misses = 0
         track._centroid_history.append((t_s, det.centroid_mm))
+        if self.centroid_window > 0:
+            track._centroid_history = track._centroid_history[-self.centroid_window :]
 
         window = int(self.cfg["growth_window"])
         track._area_history.append((t_s, det.area_mm2))

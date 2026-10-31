@@ -325,3 +325,13 @@ def test_seal_leak_log_withholds_isolation(cfg) -> None:
     assert result.steps[0].status == "VALVE_SEAL_LEAK"
     assert "Verification failed" in result.steps[0].detail
     assert "Isolation verified" not in result.steps[0].detail
+
+
+def test_fault_log_withholds_stem_closure(cfg) -> None:
+    result = _emergency(cfg, ValveStatus.FAULT).run("junction 96.4 C")
+
+    assert result.state is IncidentState.HARD_TRIP
+    assert result.steps[0].status == "FAULT"
+    assert "Verification failed" in result.steps[0].detail
+    assert "Stem closed: unproven" in result.steps[0].detail
+    assert "Isolation verified" not in result.steps[0].detail

@@ -354,7 +354,8 @@ class CandidateManager:
         ]
         if advance_wetness:
             for candidate in candidates:
-                self._source_obs.setdefault(candidate.track_id, []).append(
+                obs_list = self._source_obs.setdefault(candidate.track_id, [])
+                obs_list.append(
                     (
                         t_s,
                         candidate.centroid_mm,
@@ -362,6 +363,8 @@ class CandidateManager:
                         candidate.quality,
                     )
                 )
+                if len(obs_list) > 100:
+                    self._source_obs[candidate.track_id] = obs_list[:50] + obs_list[-50:]
         # Stable ordering for selection: largest area first, then lower id.
         candidates.sort(key=lambda candidate: (-candidate.area_mm2, candidate.track_id))
         return tuple(candidates)

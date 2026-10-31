@@ -809,6 +809,57 @@ async def run_scenario(
             ),
         )
         watchdog_task = asyncio.create_task(watchdog.run(watchdog_stop))
+        # Yield to allow the watchdog to take its initial poll before perception starts
+        await asyncio.sleep(0)
+
+        if watchdog.actuated:
+            assert watchdog.trip is not None
+            sample = telemetry.sample(0.0)
+            evidence = Evidence(
+                zone=-1,
+                phi_v=0.0,
+                phi_h=0.0,
+                phi_t=0.0,
+                W=0.0,
+                dA_dt=0.0,
+                q=0.0,
+                camera_healthy=True,
+                temp_c=sample.surface_c,
+                ticks=0,
+            )
+            decision = Decision(
+                rule_id="R1_WATCHDOG",
+                label=SystemLabel.EMERGENCY_TRIP,
+                actions=("VALVE_CLOSE", "FORCE_OFF"),
+                p=1.0,
+            )
+            return await _finish(
+                name=name,
+                scenario=scenario,
+                cfg=cfg,
+                decision=decision,
+                label=SystemLabel.EMERGENCY_TRIP,
+                evidence=evidence,
+                sample=sample,
+                candidate=None,
+                actions=emergency_actions,
+                sequence_state=emergency_state,
+                trip_reason=emergency_reason,
+                junction_c=_junction_of(watchdog),
+                timing=TimingSamples((), (), emergency_ms),
+                allow_llm=allow_llm,
+                sam_mode=mode,
+                sam_stats=None,
+                ticks=0,
+                frame_range=(0, 0),
+                frames=0,
+                out_dir=out_dir,
+                tick_rate_hz=policy.hz,
+                rate_changes=policy.changes,
+                protocol_mode=protocol,
+                bus=bus,
+                source_estimate=None,
+            )
 
     def watchdog_abort() -> str | None:
         if watchdog is not None and watchdog.trip is not None:
@@ -1113,22 +1164,43 @@ async def run_scenario(
 
     # The clip can end before a real-socket emergency sequence finishes. The
     # actions already ran; finish the filing so the trip is never lost.
-    if (
-        watchdog is not None
-        and watchdog.actuated
-        and last_evidence is not None
-        and last_sample is not None
-        and last_decision is not None
-    ):
+    if watchdog is not None and watchdog.actuated:
         assert watchdog.trip is not None
+        effective_sample = last_sample if last_sample is not None else telemetry.sample(0.0)
+        effective_evidence = (
+            last_evidence
+            if last_evidence is not None
+            else Evidence(
+                zone=-1,
+                phi_v=0.0,
+                phi_h=0.0,
+                phi_t=0.0,
+                W=0.0,
+                dA_dt=0.0,
+                q=0.0,
+                camera_healthy=True,
+                temp_c=effective_sample.surface_c,
+                ticks=0,
+            )
+        )
+        effective_decision = (
+            last_decision
+            if last_decision is not None
+            else Decision(
+                rule_id="R1_WATCHDOG",
+                label=SystemLabel.EMERGENCY_TRIP,
+                actions=("VALVE_CLOSE", "FORCE_OFF"),
+                p=1.0,
+            )
+        )
         return await _finish(
             name=name,
             scenario=scenario,
             cfg=cfg,
-            decision=last_decision,
+            decision=effective_decision,
             label=SystemLabel.EMERGENCY_TRIP,
-            evidence=last_evidence,
-            sample=last_sample,
+            evidence=effective_evidence,
+            sample=effective_sample,
             candidate=last_candidate,
             actions=emergency_actions,
             sequence_state=emergency_state,
@@ -1146,7 +1218,9 @@ async def run_scenario(
             rate_changes=policy.changes,
             protocol_mode=protocol,
             bus=bus,
-            source_estimate=_source_for(last_candidate, last_evidence.phi_h),
+            source_estimate=_source_for(
+                last_candidate, effective_evidence.phi_h if effective_evidence is not None else 0.0
+            ),
         )
 
     # The watchdog task failed: the trip was initiated but its actuation could
@@ -1155,22 +1229,43 @@ async def run_scenario(
     # outcome, then re-raise so the process exits non-zero instead of reporting
     # a clean run after an unconfirmed emergency action.
     if watchdog_error is not None:
-        if (
-            isinstance(watchdog_error, WatchdogActuationError)
-            and watchdog is not None
-            and last_evidence is not None
-            and last_sample is not None
-            and last_decision is not None
-        ):
+        if isinstance(watchdog_error, WatchdogActuationError) and watchdog is not None:
             assert watchdog.trip is not None
+            effective_sample = last_sample if last_sample is not None else telemetry.sample(0.0)
+            effective_evidence = (
+                last_evidence
+                if last_evidence is not None
+                else Evidence(
+                    zone=-1,
+                    phi_v=0.0,
+                    phi_h=0.0,
+                    phi_t=0.0,
+                    W=0.0,
+                    dA_dt=0.0,
+                    q=0.0,
+                    camera_healthy=True,
+                    temp_c=effective_sample.surface_c,
+                    ticks=0,
+                )
+            )
+            effective_decision = (
+                last_decision
+                if last_decision is not None
+                else Decision(
+                    rule_id="R1_WATCHDOG",
+                    label=SystemLabel.EMERGENCY_TRIP,
+                    actions=("VALVE_CLOSE", "FORCE_OFF"),
+                    p=1.0,
+                )
+            )
             await _finish(
                 name=name,
                 scenario=scenario,
                 cfg=cfg,
-                decision=last_decision,
+                decision=effective_decision,
                 label=SystemLabel.EMERGENCY_TRIP,
-                evidence=last_evidence,
-                sample=last_sample,
+                evidence=effective_evidence,
+                sample=effective_sample,
                 candidate=last_candidate,
                 actions=_failed_trip_actions(watchdog, last_t_s, emergency_actions),
                 sequence_state=IncidentState.FAILED_SAFE,
@@ -1188,7 +1283,10 @@ async def run_scenario(
                 rate_changes=policy.changes,
                 protocol_mode=protocol,
                 bus=bus,
-                source_estimate=_source_for(last_candidate, last_evidence.phi_h),
+                source_estimate=_source_for(
+                    last_candidate,
+                    effective_evidence.phi_h if effective_evidence is not None else 0.0,
+                ),
             )
         raise watchdog_error
 

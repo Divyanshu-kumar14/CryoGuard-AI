@@ -396,3 +396,27 @@ def test_a_failed_primary_files_failed_safe_with_a_verified_fallback(
     assert ("TRIP", "INITIATED") in by_command
     assert ("FORCE_OFF", "FAILED") in by_command
     assert ("FORCE_OFF_FALLBACK", VERIFIED_OFF) in by_command
+
+
+@pytest.mark.slow
+def test_watchdog_trip_before_first_frame_files_incident(cfg, topology, tmp_path) -> None:
+    hot = copy.deepcopy(cfg)
+    hot["nvml"]["fake_junction_c"] = 96.4
+    hot["watchdog"]["period_ms"] = 0
+
+    result = asyncio.run(
+        run_scenario(
+            "glint",
+            hot,
+            topology,
+            out_dir=tmp_path,
+            max_seconds=-1.0,
+            protocol_mode="memory",
+        )
+    )
+
+    assert result.report is not None
+    assert result.report.trip_reason == "JUNCTION_OVER_TEMP"
+    assert result.report.physical_evidence.label == "EMERGENCY_TRIP"
+    paths = list(tmp_path.glob("INC-*.json"))
+    assert len(paths) == 1

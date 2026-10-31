@@ -92,9 +92,12 @@ class RedfishClient:
         with httpx.Client(timeout=self.timeout_s, headers=self.headers) as client:
             yield client
 
-    def system(self) -> dict[str, Any]:
-        with self._http() as client:
+    def system(self, client: httpx.Client | None = None) -> dict[str, Any]:
+        if client is not None:
             response = client.get(self.system_url)
+        else:
+            with self._http() as http_client:
+                response = http_client.get(self.system_url)
         if response.status_code != 200:
             raise RedfishError(f"GET {self.system_url} -> {response.status_code}")
         body = response.json()
@@ -102,29 +105,40 @@ class RedfishClient:
             raise RedfishError("system resource is not a JSON object")
         return body
 
-    def power_state(self) -> str:
+    def power_state(self, client: httpx.Client | None = None) -> str:
         try:
-            return str(self.system().get("PowerState", "Unknown"))
+            return str(self.system(client=client).get("PowerState", "Unknown"))
         except (httpx.HTTPError, RedfishError, ValueError):
             return "Unknown"
 
-    def _await_off(self) -> tuple[bool, str]:
+    def _await_off(self, client: httpx.Client | None = None) -> tuple[bool, str]:
         """Poll until ``PowerState`` reads ``Off`` or the deadline passes.
 
         Returns the verdict and the last state read. ``Unknown`` is not a verdict:
         a GET that fails is retried on the next poll, never treated as success. A
         poll already in flight is bounded by ``timeout_ms``, so the deadline can
-        overshoot by at most one request.
+        overshoot by at most one request. Reuses the HTTP client connection across
+        polls to prevent BMC socket exhaustion.
         """
 
         deadline = time.monotonic() + self.power_off_timeout_s
-        while True:
-            state = self.power_state()
-            if state == "Off":
-                return True, state
-            if time.monotonic() >= deadline:
-                return False, state
-            time.sleep(self.poll_interval_s)
+        if client is not None:
+            while True:
+                state = self.power_state(client=client)
+                if state == "Off":
+                    return True, state
+                if time.monotonic() >= deadline:
+                    return False, state
+                time.sleep(self.poll_interval_s)
+        else:
+            with self._http() as http_client:
+                while True:
+                    state = self.power_state(client=http_client)
+                    if state == "Off":
+                        return True, state
+                    if time.monotonic() >= deadline:
+                        return False, state
+                    time.sleep(self.poll_interval_s)
 
     def force_off(self) -> PowerResult:
         attempts = 0
@@ -134,67 +148,69 @@ class RedfishClient:
             try:
                 with self._http() as client:
                     response = client.post(self.reset_url, json={"ResetType": "ForceOff"})
+                    body: dict[str, Any] = {}
+                    try:
+                        parsed = response.json()
+                        if isinstance(parsed, dict):
+                            body = parsed
+                    except ValueError:
+                        body = {}
+
+                    if response.status_code in (200, 202, 204):
+                        # Accepted is not off. The body's PowerState is the BMC echoing its
+                        # intent, not evidence; only a readback can end the sequence.
+                        simulated = _simulated(body) or self.simulated
+                        verified, state = self._await_off(client=client)
+                        if verified:
+                            return PowerResult(
+                                True,
+                                state,
+                                attempts,
+                                response.status_code,
+                                simulated,
+                                "",
+                                VERIFIED_OFF,
+                            )
+                        detail = (
+                            f"PowerState still {state} after "
+                            f"{self.power_off_timeout_s * 1000:.0f} ms"
+                        )
+                        return PowerResult(
+                            False,
+                            state,
+                            attempts,
+                            response.status_code,
+                            simulated,
+                            detail,
+                            VERIFICATION_TIMEOUT,
+                        )
+
+                    if response.status_code == 409:
+                        state = self.power_state(client=client)
+                        if state == "Off":
+                            return PowerResult(
+                                True,
+                                "Off",
+                                attempts,
+                                409,
+                                _simulated(body) or self.simulated,
+                                "already off",
+                                VERIFIED_OFF,
+                            )
+                        return PowerResult(
+                            False,
+                            state,
+                            attempts,
+                            409,
+                            _simulated(body) or self.simulated,
+                            "conflict and the system is not off",
+                        )
             except httpx.HTTPError as exc:
                 last_detail = f"{type(exc).__name__}: {exc}"
                 if attempt < self.max_retries:
                     time.sleep(self.retry_backoff_s * (attempt + 1))
                     continue
                 return PowerResult(False, "Unknown", attempts, 0, self.simulated, last_detail)
-
-            body: dict[str, Any] = {}
-            try:
-                parsed = response.json()
-                if isinstance(parsed, dict):
-                    body = parsed
-            except ValueError:
-                body = {}
-
-            if response.status_code in (200, 202, 204):
-                # Accepted is not off. The body's PowerState is the BMC echoing its
-                # intent, not evidence; only a readback can end the sequence.
-                simulated = _simulated(body) or self.simulated
-                verified, state = self._await_off()
-                if verified:
-                    return PowerResult(
-                        True,
-                        state,
-                        attempts,
-                        response.status_code,
-                        simulated,
-                        "",
-                        VERIFIED_OFF,
-                    )
-                detail = f"PowerState still {state} after {self.power_off_timeout_s * 1000:.0f} ms"
-                return PowerResult(
-                    False,
-                    state,
-                    attempts,
-                    response.status_code,
-                    simulated,
-                    detail,
-                    VERIFICATION_TIMEOUT,
-                )
-
-            if response.status_code == 409:
-                state = self.power_state()
-                if state == "Off":
-                    return PowerResult(
-                        True,
-                        "Off",
-                        attempts,
-                        409,
-                        _simulated(body) or self.simulated,
-                        "already off",
-                        VERIFIED_OFF,
-                    )
-                return PowerResult(
-                    False,
-                    state,
-                    attempts,
-                    409,
-                    _simulated(body) or self.simulated,
-                    "conflict and the system is not off",
-                )
 
             if 500 <= response.status_code < 600 and attempt < self.max_retries:
                 last_detail = f"HTTP {response.status_code}"

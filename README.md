@@ -18,7 +18,7 @@ node. The language model writes the explanation **after** the incident is sealed
 
 ```bash
 make setup          # pinned Python 3.11 environment from uv.lock
-make check          # ruff, mypy strict (61 files), 515 passed in ~75s
+make check          # ruff, mypy strict (61 files), 520 passed in ~75s
 make demo           # headless leak scenario -> incident JSON
 make bench          # deterministic offline benchmark over every fixture
 make serve          # dashboard at http://127.0.0.1:8080

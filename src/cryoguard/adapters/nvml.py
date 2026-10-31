@@ -150,82 +150,104 @@ class RealNvml:
             raise NvmlError(f"tolerance_w must be positive: {tolerance_w}")
         self.device_index = device_index
         self.tolerance_w = float(tolerance_w)
+        self._initialized = False
+        self._pynvml: Any = None
 
     @staticmethod
     def available() -> bool:
         return find_spec("pynvml") is not None
 
-    def sample(self) -> GpuObservation:
-        """One consistent poll in a single NVML session.
+    def _ensure_init(self) -> Any:
+        if self._pynvml is None:
+            try:
+                self._pynvml = import_module("pynvml")
+            except ImportError as exc:
+                raise NvmlError("pynvml is not installed") from exc
+        if not self._initialized:
+            try:
+                self._pynvml.nvmlInit()
+                self._initialized = True
+            except Exception as exc:
+                raise NvmlError(f"NVML init failed: {type(exc).__name__}: {exc}") from exc
+        return self._pynvml
 
-        Contract: exactly one ``nvmlInit`` / ``nvmlShutdown`` pair per call,
-        so temperature, utilization, power, and clocks belong to the same
-        poll. A missing temperature or device handle raises ``NvmlError``
-        (fail-loud); a missing power/clock capability yields ``None`` for
-        that channel only. The temperature is ``NVML_TEMPERATURE_GPU`` and
-        is labelled as GPU temperature, never hotspot/junction.
+    def close(self) -> None:
+        """Release the NVML driver handle session."""
+        if self._initialized and self._pynvml is not None:
+            try:
+                self._pynvml.nvmlShutdown()
+            except Exception:
+                pass
+            finally:
+                self._initialized = False
+
+    def __del__(self) -> None:
+        self.close()
+
+    def sample(self) -> GpuObservation:
+        """One consistent poll in a managed NVML session.
+
+        Contract: queries temperature, utilization, power, and clocks in one
+        poll without reinitializing NVML on every tick. If the session was
+        invalidated, recovers once before raising. A missing temperature or
+        device handle raises ``NvmlError`` (fail-loud); a missing power/clock
+        capability yields ``None`` for that channel only. The temperature is
+        ``NVML_TEMPERATURE_GPU`` and is labelled as GPU temperature.
         """
 
+        pynvml = self._ensure_init()
         try:
-            pynvml: Any = import_module("pynvml")
-        except ImportError as exc:
-            raise NvmlError("pynvml is not installed") from exc
-
-        initialized = False
-        try:
-            pynvml.nvmlInit()
-            initialized = True
+            handle = pynvml.nvmlDeviceGetHandleByIndex(self.device_index)
+        except Exception:
+            # Attempt one session recovery if the session was invalidated
+            self.close()
             try:
+                pynvml = self._ensure_init()
                 handle = pynvml.nvmlDeviceGetHandleByIndex(self.device_index)
-            except Exception as exc:
+            except Exception as retry_exc:
                 raise NvmlError(
                     f"NVML error: unknown device index {self.device_index}: "
-                    f"{type(exc).__name__}: {exc}"
-                ) from exc
-            try:
-                temp_c = float(pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU))
-            except Exception as exc:
-                raise NvmlError(
-                    f"NVML error: GPU temperature unavailable: {type(exc).__name__}: {exc}"
-                ) from exc
-            utilization: float | None = None
-            try:
-                utilization = float(pynvml.nvmlDeviceGetUtilizationRates(handle).gpu)
-            except Exception:
-                utilization = None
-            power_w: float | None = None
-            try:
-                power_w = float(pynvml.nvmlDeviceGetPowerUsage(handle)) / 1000.0
-            except Exception:
-                power_w = None
-            clock_mhz: float | None = None
-            try:
-                clock_mhz = float(pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_SM))
-            except Exception:
-                clock_mhz = None
-            return GpuObservation(
-                temp_c=temp_c,
-                utilization_pct=utilization,
-                power_w=power_w,
-                clock_mhz=clock_mhz,
-                device_index=self.device_index,
-                sampled_monotonic_s=time.monotonic(),
-                source_sequence=None,
-                source_timestamp_s=None,
-                valid=True,
-                backend=GpuBackend.REAL,
-                detail="NVML_TEMPERATURE_GPU",
-            )
-        except NvmlError:
-            raise
-        except Exception as exc:  # NVML raises its own exception type
-            raise NvmlError(f"NVML error: {type(exc).__name__}: {exc}") from exc
-        finally:
-            if initialized:
-                try:
-                    pynvml.nvmlShutdown()
-                except Exception:
-                    pass
+                    f"{type(retry_exc).__name__}: {retry_exc}"
+                ) from retry_exc
+
+        try:
+            temp_c = float(pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU))
+        except Exception as exc:
+            raise NvmlError(
+                f"NVML error: GPU temperature unavailable: {type(exc).__name__}: {exc}"
+            ) from exc
+
+        utilization: float | None = None
+        try:
+            utilization = float(pynvml.nvmlDeviceGetUtilizationRates(handle).gpu)
+        except Exception:
+            utilization = None
+
+        power_w: float | None = None
+        try:
+            power_w = float(pynvml.nvmlDeviceGetPowerUsage(handle)) / 1000.0
+        except Exception:
+            power_w = None
+
+        clock_mhz: float | None = None
+        try:
+            clock_mhz = float(pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_SM))
+        except Exception:
+            clock_mhz = None
+
+        return GpuObservation(
+            temp_c=temp_c,
+            utilization_pct=utilization,
+            power_w=power_w,
+            clock_mhz=clock_mhz,
+            device_index=self.device_index,
+            sampled_monotonic_s=time.monotonic(),
+            source_sequence=None,
+            source_timestamp_s=None,
+            valid=True,
+            backend=GpuBackend.REAL,
+            detail="NVML_TEMPERATURE_GPU",
+        )
 
     def junction_c(self) -> float:
         """GPU temperature in Celsius. Raises rather than inventing a value."""
@@ -248,14 +270,13 @@ class RealNvml:
 
     def clamp(self) -> ClampResult:
         try:
-            pynvml: Any = import_module("pynvml")
-        except ImportError:
-            return ClampResult(ok=False, applied_w=0.0, detail="pynvml is not installed")
+            pynvml = self._ensure_init()
+        except NvmlError as exc:
+            return ClampResult(ok=False, applied_w=0.0, detail=str(exc))
+        except Exception as exc:
+            return ClampResult(ok=False, applied_w=0.0, detail=f"NVML init failed: {exc}")
 
-        initialized = False
         try:
-            pynvml.nvmlInit()
-            initialized = True
             handle = pynvml.nvmlDeviceGetHandleByIndex(self.device_index)
             minimum_mw, _maximum_mw = pynvml.nvmlDeviceGetPowerManagementLimitConstraints(handle)
             if int(minimum_mw) <= 0:
@@ -270,12 +291,6 @@ class RealNvml:
                 applied_w=0.0,
                 detail=f"NVML error: {type(exc).__name__}: {exc}",
             )
-        finally:
-            if initialized:
-                try:
-                    pynvml.nvmlShutdown()
-                except Exception:
-                    pass
 
         applied_w = readback_mw / 1000.0
         target_w = minimum_mw / 1000.0

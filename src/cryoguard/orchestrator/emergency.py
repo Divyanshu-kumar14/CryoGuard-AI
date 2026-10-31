@@ -90,10 +90,16 @@ class EmergencySequence:
                     "Close accepted; Stem closed; Line depressurized; "
                     f"Isolation verified; {valve.detail or fallback}"
                 )
-            else:
+            elif valve.status in (ValveStatus.VALVE_SEAL_LEAK, ValveStatus.SENSOR_DISAGREEMENT):
                 fallback = f"limit switch; band {valve.status.value}"
                 valve_detail = (
                     "Verification failed; Stem closed; Line depressurized: unproven; "
+                    f"{valve.detail or fallback}"
+                )
+            else:
+                fallback = f"limit switch; band {valve.status.value}"
+                valve_detail = (
+                    "Verification failed; Stem closed: unproven; Line depressurized: unproven; "
                     f"{valve.detail or fallback}"
                 )
             self._record(
