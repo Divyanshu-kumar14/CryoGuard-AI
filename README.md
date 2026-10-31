@@ -7,7 +7,7 @@ node. The language model writes the explanation **after** the incident is sealed
 
 ![CryoGuard dashboard showing a confirmed leak](docs/dashboard.png)
 
-> **Hackathon Evaluators:** Watch the [2-Minute Demo Video](https://youtu.be/YOUR_VIDEO_ID) | Complete provenance and commit audit in [HACKATHON_CONTRIBUTIONS.md](HACKATHON_CONTRIBUTIONS.md).
+> **Hackathon Evaluators:** Watch the [2-Minute Demo Video](https://youtu.be/Zg6VHJBBLYU) | Complete provenance and commit audit in [HACKATHON_CONTRIBUTIONS.md](HACKATHON_CONTRIBUTIONS.md).
 >
 > **Everything shown is simulated or synthetic.** There is no camera, UV
 > excitation, long-pass filter, tracer, real PLC/BMC, or host GPU in this
