@@ -5,7 +5,7 @@ MYPY := .venv/bin/mypy
 SCENARIO ?= leak
 SPLIT ?= all
 
-.PHONY: setup lint format typecheck test check export fixtures probe serve demo sims bench bench-check readme-sync sam-audit seed-sam checkpoints env-check
+.PHONY: setup lint format typecheck test check export fixtures probe serve demo sims bench bench-check readme-sync sam-audit seed-sam checkpoints env-check docker-build docker-run
 
 ## Create the pinned environment from uv.lock. uv owns the venv; .python-version pins 3.11.
 setup:
@@ -82,3 +82,11 @@ seed-sam:
 ## Emit deterministic training checkpoints for the checkpoint gate.
 checkpoints:
 	PYTHONPATH=src $(PY) -m cryoguard.sims.train_job --duration 30
+
+## Build the multi-stage OCI container image.
+docker-build:
+	docker build -t cryoguard-ai:latest .
+
+## Run the dashboard inside the container on http://127.0.0.1:8080.
+docker-run:
+	docker run --rm -p 8080:8080 -v $$(pwd)/artifacts/incidents:/app/artifacts/incidents cryoguard-ai:latest

@@ -1,0 +1,13 @@
+services:
+  cryoguard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cryoguard-ai
+    ports:
+      - "8080:8080"
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./artifacts/incidents:/app/artifacts/incidents
+    restart: unless-stopped

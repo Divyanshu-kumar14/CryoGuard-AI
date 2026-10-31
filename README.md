@@ -22,6 +22,10 @@ make check          # ruff, mypy strict (61 files), 520 passed in ~75s
 make demo           # headless leak scenario -> incident JSON
 make bench          # deterministic offline benchmark over every fixture
 make serve          # dashboard at http://127.0.0.1:8080
+
+# Or run via Docker:
+make docker-build   # build multi-stage container
+make docker-run     # serve dashboard on http://127.0.0.1:8080
 ```
 
 `make serve` auto-runs the leak clip. Use `make serve SCENARIO=glint` for another
